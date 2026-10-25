@@ -6,6 +6,18 @@ die Versionierung an [Semantic Versioning](https://semver.org/lang/de/).
 
 ## [Unreleased]
 
+### Hinzugefügt
+- **Z80-Emulator** (`z80::Cpu`): alle dokumentierten und die verbreiteten undokumentierten Befehle,
+  Flags 3/5 und `MEMPTR`, T-States pro Befehl, Interrupts (IM 0/1/2, NMI), Port-Handler.
+  Besteht ZEXDOC und ZEXALL (67/67).
+- Debugger-Funktionen: Einzelschritt, `run`/`runUntil`/`runUntilReturn`/`stepOver`, Breakpoints,
+  Watchpoints, Befehls- und Zyklenlimits, Trace-Hook.
+- Zustand: `CpuState`, `Snapshot` (Checkpoints im Speicher, Snapshot-Datei `Z80EMUS1`), CPU-Zustand
+  als JSON, Registerzugriff per Name.
+- **`z80tool serve`**: JSON-Zeilenprotokoll für LLM-Agenten (Assemblieren, Ausführen, `call`, `diff`,
+  Checkpoints, Ein-/Ausgabe, …); Dateizugriff nur mit `--allow-files`.
+- `tools/zex_runner.cpp` und CI-Job für ZEXDOC/ZEXALL; Tests `cpu`, `session`.
+
 ## [0.1.0]
 
 Erste C++-Version: Portierung der beiden BASIC-Programme (Z80-Assembler, Z80-Disassembler)

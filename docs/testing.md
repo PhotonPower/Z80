@@ -16,6 +16,9 @@ Die Tests brauchen kein externes Framework; `tests/test_util.hpp` stellt `CHECK`
 | `image_io`         | `.sna` laden/patchen, Intel-HEX-Prüfsummen, Dateizugriff |
 | `robustness`       | feste Zufallsfolge: für 150 Zufallsspeicher gilt `assemble(disassemble(x)) == x`; 6000 zufällige/halbstrukturierte Quelltexte dürfen den Assembler nicht zum Absturz bringen; jede akzeptierte Zeile muss vom Dekoder wieder als gültiger Befehl gleicher Länge erkannt werden |
 
+| `cpu`              | Emulator: Flags, BCD, Zeitverhalten (inkl. indizierter Befehle, `LDIR`, `DJNZ`), Block-/Index-/undokumentierte Befehle, Aufruf/Rückkehr, `runUntilReturn` (auch verschachtelt), `stepOver`, Breakpoints, Limits, Watchpoints, Interrupts IM 1/2, EI-Verzögerung, NMI/`RETN`, `HALT`, Ports, Registernamen, Snapshots (Roundtrip, beschädigte Dateien), JSON-Zustand, **40 × Zufallscode: Wiederholung aus Snapshot ist identisch** |
+| `session`          | JSON-Parser/-Ausgabe (inkl. Fehlerfälle, Verschachtelungsgrenze), Agenten-Protokoll: Assemblieren/Laufen/Lesen, Breakpoints, `call`, Checkpoints, `diff`, E/A, Interrupts, Fehlerbehandlung, gesperrter Dateizugriff, Snapshot-Dateien |
+
 Der Roundtrip-Test beweist die Konsistenz von Dekoder und Assembler **untereinander**. Gegen
 gemeinsame Denkfehler schützt die Kreuzprüfung mit unabhängigen Werkzeugen.
 
@@ -37,6 +40,25 @@ Ergebnis bei der Entwicklung (Debian `z80asm` 1.8, `z80dasm` 1.1.6):
 - Umgekehrt wurden alle **1092** Byte-Folgen, die der Dekoder als ungültig (`DB`) einstuft, an
   `z80dasm` gegeben: 1090 davon erkennt auch `z80dasm` nicht als regulären Befehl; die übrigen
   zwei (`DD CB d 30`, `FD CB d 30`) sind `SLI`, also der undokumentierte `SLL`.
+
+## Emulator: ZEXDOC und ZEXALL
+
+Die Befehlstestprogramme von Frank Cringle (ZEXDOC prüft dokumentierte Flags, ZEXALL zusätzlich die
+undokumentierten) prüfen jeden Befehl mit Millionen Eingaben gegen CRC-Werte, die von echter
+Hardware stammen.
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DZ80_BUILD_TOOLS=ON && cmake --build build
+curl -LO https://raw.githubusercontent.com/superzazu/z80/master/roms/zexdoc.cim   # MIT, superzazu/z80
+curl -LO https://raw.githubusercontent.com/superzazu/z80/master/roms/zexall.cim
+./build/z80_zex zexdoc.cim
+./build/z80_zex zexall.cim
+```
+
+Ergebnis: **beide 67/67 `OK`, 0 `ERROR`** (je ≈5,8 Mrd. Befehle, ≈ 1 Minute im Release-Build). Der
+Runner gibt bei einem Fehler den Exit-Code 1 zurück. Die Programme liegen nicht im Repository;
+die CI lädt sie (Job `zex`). Eine Abkürzung für den Alltag gibt es nicht: ohne Release-Build ist der
+Lauf deutlich langsamer.
 
 ## Sanitizer
 

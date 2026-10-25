@@ -3,10 +3,12 @@
 > Dieses Dokument beschreibt **Pläne**, keine fertigen Funktionen. Reihenfolge und Umfang sind
 > Vorschläge zur Diskussion.
 
-## Wo wir stehen (0.1)
+## Wo wir stehen
 
-Assembler und Disassembler als Bibliothek plus Kommandozeile, vollständig getestet
-([testing.md](testing.md)). Die Bibliothek enthält bereits die Bausteine, die ein Monitor braucht
+Assembler, Disassembler und **Emulator** als Bibliothek plus Kommandozeile, vollständig getestet
+([testing.md](testing.md)). Der Emulator ([emulator.md](emulator.md)) besteht ZEXDOC/ZEXALL und bietet
+Einzelschritt, Breakpoints, Watchpoints, Lauf bis Rückkehr, Checkpoints und Snapshot-Dateien;
+`z80tool serve` macht ihn für Agenten nutzbar ([agent-protocol.md](agent-protocol.md)). Die Bibliothek enthält bereits die Bausteine, die ein Monitor braucht
 ([architecture.md](architecture.md#erweiterungspunkte-für-den-monitor)): zustandsloses
 `decode()`, einzeiliges `encodeInstruction()`, `Symbolizer`, `Memory`.
 
@@ -37,14 +39,18 @@ Dafür nötig:
 - Zeileneingabe mit Verlauf (z. B. `linenoise`/`readline` oder eigene Minimalversion) und ein
   Kommandoparser mit Tests.
 
-## Meilenstein 0.3 – CPU-Kern und Ausführen
+## Meilenstein 0.3 – Emulator (weitgehend erledigt)
 
-- Z80-Interpreter (`z80emu`, eigene Bibliothek, nutzt `Memory`): alle dokumentierten Befehle,
-  Flags, Zyklen, Interrupts.
-- Registeranzeige und -änderung (`r`), Einzelschritt (`n`), Ablauf bis Haltepunkt (`g`),
-  Haltepunkte (`b`), Ablaufprotokoll (`t`).
-- Ports und Speicher als Hooks (Geräte-Anbindung), Banking.
-- Test des Kerns gegen bekannte Befehlstestprogramme (z. B. ZEXDOC/ZEXALL).
+Erledigt: Interpreter mit allen dokumentierten und den verbreiteten undokumentierten Befehlen,
+Flags, Zyklen pro Befehl, Interrupts; Einzelschritt, Breakpoints, Watchpoints, Lauf bis Rückkehr,
+Ablaufprotokoll; Port-Hooks; Test gegen ZEXDOC/ZEXALL; Zustand speichern/laden; Agenten-Protokoll.
+
+Offen:
+- Speicher mit Banking/ROM-Überlagerung und Speicher-Hooks (aktuell flache 64 KiB);
+- Bus-genaues Timing (Wait-States, Contention) für maschinenspezifisches Verhalten;
+- Geräte-Modelle (z. B. CPC: Gate Array, CRTC, PPI; Spectrum: ULA) und Firmware-Aufrufe als
+  Hooks (`CALL &BB5A` → Textausgabe) – nötig, damit echte Programme ohne ROM laufen;
+- Monitor-Befehle `r`, `n`, `g`, `b`, `t` im interaktiven Frontend auf Basis der vorhandenen API.
 
 ## Danach (Ideen)
 
@@ -59,7 +65,7 @@ Dafür nötig:
 1. **Zielplattform:** nur Amstrad CPC (`.sna`) oder allgemein Z80 (ZX Spectrum, MSX, CP/M, …)?
 2. **Bedienung:** reine Textkonsole im Stil klassischer Monitore, eine TUI (z. B. mit Registern und
    Disassembly gleichzeitig) oder später eine grafische Oberfläche?
-3. **Ausführen:** eigener Z80-Emulator im Projekt (Meilenstein 0.3) oder Anbindung an einen
-   vorhandenen Emulator (z. B. über dessen Debug-Schnittstelle)?
+3. **Ausführen:** ~~eigener Emulator oder Anbindung an einen vorhandenen~~ – entschieden: eigener
+   Emulator (`z80::Cpu`). Offen ist, welche Geräte/Firmware nachgebildet werden sollen.
 4. **Befehlsstil:** eigener Befehlssatz (wie oben vorgeschlagen) oder Anlehnung an einen bestimmten
    historischen Monitor (z. B. Zeus, Devpac-Monitor, MAXAM)?

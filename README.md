@@ -3,8 +3,9 @@
 [![CI](https://github.com/PhotonPower/Z80/actions/workflows/ci.yml/badge.svg)](https://github.com/PhotonPower/Z80/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Z80-Assembler und -Disassembler in modernem C++20 – hervorgegangen aus zwei BASIC-Programmen
-(`Z80_Assembler.bas`, `z80_dissass.bas`). Geplant ist der Ausbau zu einem vollständigen
+Z80-Assembler, -Disassembler und **-Emulator** in modernem C++20 – hervorgegangen aus zwei
+BASIC-Programmen (`Z80_Assembler.bas`, `z80_dissass.bas`). Der Emulator ist als Ausführungsumgebung
+für einen lokalen LLM-Agenten gedacht; geplant ist außerdem der Ausbau zu einem vollständigen
 **Maschinensprache-Monitor** ([Roadmap](docs/roadmap.md)).
 
 ## Funktionen
@@ -25,7 +26,18 @@ Z80-Assembler und -Disassembler in modernem C++20 – hervorgegangen aus zwei BA
 - Ausgabe als lesbares Listing **oder** als wieder assemblierbarer Quelltext (`--asm`, mit Labels)
 - Eingabe: Raw-Binary oder CPC-`.sna`-Snapshot
 
-Beides ist getestet: u. a. ein exhaustiver Roundtrip über alle Opcode-Präfixe, ein Property-Test
+**Emulator** ([docs/emulator.md](docs/emulator.md))
+- befehlsgenauer Z80-Kern: **besteht ZEXDOC und ZEXALL** (inkl. undokumentierter Flags und `MEMPTR`),
+  führt auch undokumentierte Befehle (`SLL`, `IXH/IXL`, …) aus; T-States pro Befehl
+- Einzelschritt, Lauf bis Breakpoint/Adresse/Rückkehr (`runUntilReturn`), Step-over, Watchpoints,
+  Befehls-/Zyklenlimits, Trace-Hook, Interrupts (IM 0/1/2) und NMI, Port-Handler
+- **Zustand speichern/laden:** Checkpoints im Speicher (CPU + 64 KiB), Snapshot-Datei, CPU-Zustand
+  als JSON; Wiederaufnahme ist bit-identisch
+- **Agenten-Schnittstelle** `z80tool serve`: JSON-Zeilenprotokoll über stdin/stdout
+  (assemblieren, ausführen, Register/Speicher lesen und setzen, `call`, `diff`, Checkpoints …),
+  Dateizugriff nur mit `--allow-files` ([docs/agent-protocol.md](docs/agent-protocol.md))
+
+Alles ist getestet: u. a. ein exhaustiver Roundtrip über alle Opcode-Präfixe, ein Property-Test
 (`assemble(disassemble(x)) == x` für Zufallsdaten) und eine Kreuzprüfung gegen den unabhängigen
 Assembler `z80asm` ([docs/testing.md](docs/testing.md)).
 
@@ -38,6 +50,7 @@ ctest --test-dir build                  # Tests
 
 ./build/z80tool asm examples/hello_cpc.asm -l -         # assemblieren, Listing auf den Bildschirm
 ./build/z80tool dis hello_cpc.bin --org 0x4000          # disassemblieren
+./build/z80tool serve < examples/agent_session.jsonl    # Emulator per JSON-Protokoll
 ```
 
 Voraussetzungen: CMake ≥ 3.16, C++20-Compiler (GCC ≥ 11, Clang ≥ 14, MSVC 2022).
@@ -77,6 +90,8 @@ $ z80tool dis hello.bin --org 0x4000 --asm -o re.asm && z80tool asm re.asm -o re
 | [docs/usage.md](docs/usage.md)                          | Kommandozeile, alle Optionen, Rezepte               |
 | [docs/assembler-syntax.md](docs/assembler-syntax.md)    | Quelltextformat, Ausdrücke, Pseudobefehle           |
 | [docs/formats.md](docs/formats.md)                      | Kommentardatei, `.sna`, Intel HEX, Ausgabeformate   |
+| [docs/emulator.md](docs/emulator.md)                    | Z80-Emulator: API, Genauigkeit, Zustand speichern  |
+| [docs/agent-protocol.md](docs/agent-protocol.md)        | JSON-Protokoll für LLM-Agenten (`z80tool serve`)   |
 | [docs/architecture.md](docs/architecture.md)            | Aufbau des Codes, Algorithmen, Erweiterungspunkte   |
 | [docs/migration-from-basic.md](docs/migration-from-basic.md) | Was aus den BASIC-Programmen wurde; behobene Fehler |
 | [docs/testing.md](docs/testing.md)                      | Teststrategie und Kreuzprüfung                      |
@@ -90,7 +105,7 @@ include/z80/   öffentliche Header der Bibliothek (z80core)
 src/           Implementierung
 app/main.cpp   Kommandozeilenwerkzeug z80tool
 tests/         Unit- und Property-Tests (CTest)
-tools/         Entwicklerwerkzeuge (Kreuzprüfung gegen z80asm)
+tools/         Entwicklerwerkzeuge (Kreuzprüfung gegen z80asm, ZEXDOC/ZEXALL-Runner)
 examples/      Beispielprogramm und Kommentardatei
 docs/          Dokumentation
 ```
@@ -100,7 +115,10 @@ docs/          Dokumentation
 - Nur **dokumentierte** Befehle. Undokumentierte Opcodes (`SLL`, `IXH`/`IXL`, `IN F,(C)`, …) werden
   vom Disassembler als `DB` ausgegeben und vom Assembler nicht akzeptiert.
 - Keine Makros, bedingte Assemblierung oder `INCLUDE`.
-- Der Monitor (Speicher ansehen/ändern, Einzelschritt, Haltepunkte) ist noch nicht implementiert.
+- Der Emulator rechnet pro Befehl, nicht pro Bus-Zyklus (keine Wait-States/Contention); nur ein
+  Speicher-Layout (flache 64 KiB, keine Bank-Umschaltung).
+- Der interaktive Monitor (Eingabeschleife für Menschen) ist noch nicht implementiert; der Emulator
+  und das JSON-Protokoll sind dafür die Grundlage.
 
 ## Lizenz
 

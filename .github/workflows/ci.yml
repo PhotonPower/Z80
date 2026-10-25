@@ -51,3 +51,19 @@ jobs:
         run: cmake -S . -B build -DZ80_BUILD_TOOLS=ON -DZ80_BUILD_TESTS=OFF && cmake --build build
       - name: Compare decoder and assembler output
         run: python3 tools/crosscheck_z80asm.py build/z80_dump_forms
+
+  zex:
+    name: ZEXDOC / ZEXALL (Z80 instruction exerciser)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DZ80_BUILD_TOOLS=ON -DZ80_BUILD_TESTS=OFF && cmake --build build
+      - name: Fetch test programs (MIT, superzazu/z80)
+        run: |
+          curl -sSLO https://raw.githubusercontent.com/superzazu/z80/master/roms/zexdoc.cim
+          curl -sSLO https://raw.githubusercontent.com/superzazu/z80/master/roms/zexall.cim
+      - name: zexdoc
+        run: ./build/z80_zex zexdoc.cim | tr '\r' '\n' | tail -n 8
+      - name: zexall
+        run: ./build/z80_zex zexall.cim | tr '\r' '\n' | tail -n 8

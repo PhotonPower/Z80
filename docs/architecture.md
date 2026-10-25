@@ -92,6 +92,24 @@ formatiert sie dann als Listing oder als Quelltext. Befehle, die über den Rand 
 hinausragen, erscheinen als `DB` – das garantiert die Roundtrip-Eigenschaft
 `assemble(render(asm)) == Speicher` (getestet, siehe [testing.md](testing.md)).
 
+## Emulator und Agenten-Schnittstelle
+
+| Header | Aufgabe |
+|---|---|
+| `cpu.hpp` | `Registers`, `CpuState`, `Cpu` (Ausführung, Breakpoints, Watchpoints, Interrupts, Ports) |
+| `snapshot.hpp` | `Snapshot` (CPU + RAM), Datei-Serialisierung, Registerzugriff per Name, JSON-Zustand |
+| `json.hpp` | kleiner JSON-Baustein (Parser/Ausgabe, Insertion-Order) |
+| `session.hpp` | `Session`: eine Maschine + Symbole, Checkpoints, E/A-Log; `handle(json)` → `json` |
+
+`Cpu` dekodiert nicht über `decode()` (der Dekoder liefert Text, der Emulator braucht Bitfelder und
+Taktzahlen), sondern führt Opcodes direkt nach demselben x/y/z-Schema aus (`execMain`, `execCb`,
+`execEd`, `execBlock`). Präfixe (`DD`/`FD`) wirken über einen `mode`-Parameter, der `HL`/`H`/`L`/`(HL)`
+durch `IX`/`IXH`/`IXL`/`(IX+d)` ersetzt – so entstehen die undokumentierten Befehle ohne eigene Tabelle.
+
+Alle Läufe gehen durch eine Schleife (`Cpu::execute`); `run`, `runUntil`, `runUntilReturn`,
+`stepOver` und `stepInstruction` unterscheiden sich nur in der `RunSpec`. `Session` enthält keine
+Ein-/Ausgabe und ist deshalb ohne Prozess testbar; `app/main.cpp` verbindet sie mit stdin/stdout.
+
 ## Erweiterungspunkte (für den Monitor)
 
 - `decode()` ist zustandslos und kann für „disassembliere ab hier, n Befehle“ direkt verwendet

@@ -17,7 +17,7 @@ Weitere CMake-Optionen:
 | `Z80_BUILD_TESTS`       | `ON`     | Unit-Tests bauen                                        |
 | `Z80_WARNINGS_AS_ERRORS`| `OFF`    | Compilerwarnungen als Fehler (in der CI auf Linux `ON`) |
 | `Z80_SANITIZE`          | `OFF`    | AddressSanitizer + UBSan (GCC/Clang)                    |
-| `Z80_BUILD_TOOLS`       | `OFF`    | Entwicklerwerkzeuge (Kreuzprüfung gegen `z80asm`)       |
+| `Z80_BUILD_TOOLS`       | `OFF`    | Entwicklerwerkzeuge (`z80_dump_forms`, `z80_zex`)       |
 
 ## Regeln
 
@@ -26,6 +26,8 @@ Weitere CMake-Optionen:
 - Änderungen am Dekoder oder Assembler müssen den exhaustiven Roundtrip-Test
   (`tests/test_roundtrip.cpp`) bestehen; im Zweifel zusätzlich die Kreuzprüfung
   (`tools/crosscheck_z80asm.py`, siehe [docs/testing.md](docs/testing.md)).
+- Änderungen am Emulator müssen ZEXDOC und ZEXALL weiter bestehen (`z80_zex`, siehe
+  [docs/testing.md](docs/testing.md)); die CI prüft das.
 - Die Kernbibliothek (`include/z80`, `src`) hat keine Ein-/Ausgabe auf der Konsole und keine
   globalen Zustände; Benutzerinteraktion gehört nach `app/`.
 - Quelltext, Bezeichner und Kommentare sind Englisch, die Dokumentation unter `docs/` Deutsch.
