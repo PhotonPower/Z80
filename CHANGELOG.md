@@ -6,6 +6,11 @@ die Versionierung an [Semantic Versioning](https://semver.org/lang/de/).
 
 ## [Unreleased]
 
+### Behoben
+- Orchestrator: ausufernder „Thinking“-Modus füllte das Kontextfenster (kein Tool-Aufruf mehr). Jetzt
+  `think=false` als Standard (mit Rückfall für Modelle ohne Thinking), Abtastung nach Qwen-Empfehlung,
+  Token-Limit pro Antwort, Erkennung abgeschnittener Antworten; Prompt erklärt `OUT (C),r` (Port = BC).
+
 ### Hinzugefügt
 - Echte CPC-6128-Firmware läuft: Kaltstart bis „BASIC 1.1 Ready“ (PPI-Vsync, 300-Hz-Interrupts), Test in der CI
   (ROM wird dort geladen, nicht eingecheckt). Orchestrator: `--boot`, `--irq`, tolerante Argumentverarbeitung,

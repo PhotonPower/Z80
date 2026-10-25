@@ -128,9 +128,17 @@ dieselbe Kette, mit der das Modell später sieht, was eine Routine am Bildschirm
   Prompt und Parametern.
 - Größere Modelle machen deutlich weniger Fehler bei Tool-Aufrufen und Hardware-Wissen. Der Lauf
   braucht je Routine mehrere Runden; `--max-turns` begrenzt sie.
-- `--num-ctx` (Standard 16384) muss zum Modell passen; Bilder verbrauchen Kontext (ein zugeschnittener
-  Screenshot ist klein, ein Vollbild nicht).
-- Wenn das Modell lange „denkt“ und die Tool-Aufrufe darunter leiden, probiere `--think false`.
+- **Thinking-Modus**: Standard ist `--think false`. Qwen3-VL „denkt“ sonst oft seitenlang, wiederholt sich
+  dabei und verbraucht das ganze Kontextfenster, bevor es einen einzigen Tool-Aufruf schreibt. Das Log zeigt
+  dann `"content": ""` und ein riesiges, mittendrin abgebrochenes `"thinking"`. Der Orchestrator erkennt das
+  (`done_reason: length`), verwirft die Antwort und fordert einen konkreten nächsten Schritt an. Hilft das nicht:
+  einen `-instruct`-Tag wählen (z. B. `qwen3-vl:8b-instruct`, Tag-Namen mit `ollama list`/Bibliothek prüfen).
+  Modelle ohne Thinking-Modus werden automatisch ohne den Parameter erneut angefragt.
+- **Abtastung**: Standard `--temperature 0.7`, `top_p 0.8`, `top_k 20`, `presence_penalty 1.0`. Niedrige
+  Temperaturen (oder Greedy) führen bei Qwen zu endlosen Wiederholungen.
+- `--max-tokens` (Standard 4096) begrenzt **eine** Antwort, `--num-ctx` (Standard 32768) das ganze Fenster
+  aus Listing, Verlauf und Bildern (ein zugeschnittener Screenshot ist klein, ein Vollbild nicht). Mit
+  `--think true` brauchst du deutlich mehr, z. B. `--max-tokens 12000`.
 - Beobachte `--log`: Dort siehst du, welche Tests das Modell gemacht und was es daraus geschlossen hat.
 
 ## Robustheit gegenüber dem Modell

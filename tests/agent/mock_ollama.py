@@ -11,9 +11,14 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 
 class MockOllama:
-    def __init__(self, plans, fail_with=None):
+    def __init__(self, plans, fail_with=None, reject_think=False, truncate_first=0):
         self.plans = plans          # {"0x4025": [[("run_routine", {...})], [...]]}
         self.fail_with = fail_with  # HTTP status to answer with instead
+        self.reject_think = reject_think        # answer 400 "does not support thinking" when the request has a think parameter
+        self.truncate_first = truncate_first    # the first N answers are cut off (done_reason "length", empty content)
+        self.think_values = []
+        self.options_seen = []
+        self.hints = []
         self.requests = []
         self.images_seen = 0
         self.tool_errors = []
@@ -25,6 +30,9 @@ class MockOllama:
     def respond(self, body):
         messages = body["messages"]
         self.requests.append(body)
+        self.think_values.append(body.get("think", "absent"))
+        self.options_seen.append(body.get("options", {}))
+        self.hints += [x["content"] for x in messages if x["role"] == "user" and "cut off" in x["content"]]
         self.system_prompts.add(messages[0]["content"])
         first_user = messages[1]["content"]
         m = re.search(r"ROUTINE_ADDR=(0x[0-9A-Fa-f]+)", first_user)
@@ -58,12 +66,23 @@ class MockOllama:
             def do_POST(self):  # noqa: N802
                 length = int(self.headers.get("Content-Length", 0))
                 body = json.loads(self.rfile.read(length))
+                if outer.reject_think and "think" in body:
+                    outer.think_values.append("rejected")
+                    self.send_response(400)
+                    self.end_headers()
+                    self.wfile.write(b'{"error":"\\"mock\\" does not support thinking"}')
+                    return
                 if outer.fail_with:
                     self.send_response(outer.fail_with)
                     self.end_headers()
                     self.wfile.write(b"model not found")
                     return
-                data = json.dumps({"model": body["model"], "message": outer.respond(body), "done": True}).encode()
+                reply = {"model": body["model"], "message": outer.respond(body), "done": True}
+                if outer.truncate_first > 0:
+                    outer.truncate_first -= 1
+                    reply = {"model": body["model"], "done": True, "done_reason": "length",
+                             "message": {"role": "assistant", "content": "", "thinking": "Okay, let's tackle this ... " * 50}}
+                data = json.dumps(reply).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(data)))

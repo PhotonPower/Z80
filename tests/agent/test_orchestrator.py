@@ -358,6 +358,55 @@ class HardeningTest(unittest.TestCase):
             self.assertTrue(any("text printed via firmware: 'HELLO'" in r for r in mock.tool_results))
             self.assertGreaterEqual(mock.images_seen, 1)  # the text-form call with screenshot "true" produced an image
 
+    def test_defaults_are_safe_for_tool_calling(self):
+        with tempfile.TemporaryDirectory() as d:
+            sna, sym = build_snapshot(d)
+            mock = MockOllama({})
+            host = mock.start()
+            try:
+                OrchestratorTest("run_main").run_main(["--sna", sna, "--host", host, "--model", "mock", "--only", "0x4025", "--max-turns", "1",
+                                                       "--z80tool", Z80TOOL])
+            finally:
+                mock.stop()
+            self.assertEqual(mock.think_values[0], False)            # thinking off by default
+            o = mock.options_seen[0]
+            self.assertGreaterEqual(o["temperature"], 0.6)           # not greedy: Qwen loops endlessly at low temperature
+            self.assertEqual(o["num_predict"], 4096)                 # one answer can never fill the context window
+            self.assertEqual(o["num_ctx"], 32768)
+            self.assertIn("FULL 16-bit register pair BC", next(iter(mock.system_prompts)))  # OUT (C),r semantics are explained
+
+    def test_model_without_thinking_support_is_retried_without_the_parameter(self):
+        with tempfile.TemporaryDirectory() as d:
+            sna, sym = build_snapshot(d)
+            mock = MockOllama({}, reject_think=True)
+            host = mock.start()
+            try:
+                code, printed = OrchestratorTest("run_main").run_main(["--sna", sna, "--host", host, "--model", "mock", "--max-turns", "2",
+                                                                       "--z80tool", Z80TOOL])
+            finally:
+                mock.stop()
+            self.assertEqual(code, 0, printed)          # no abort: the request was repeated without "think"
+            self.assertIn("rejected", mock.think_values)
+            self.assertIn("absent", mock.think_values)
+
+    def test_cut_off_answers_are_recognised_and_recovered(self):
+        with tempfile.TemporaryDirectory() as d:
+            sna, sym = build_snapshot(d)
+            addr = f"0x{sym['PRINT']:04x}"
+            plans = {addr: [[("document_routine", {"addr": addr, "name": "print_string", "summary": "Prints text."})],
+                            [("finish_routine", {})]]}
+            mock = MockOllama(plans, truncate_first=2)   # like a model that thinks until the token limit
+            host = mock.start()
+            try:
+                code, printed = OrchestratorTest("run_main").run_main(["--sna", sna, "--host", host, "--model", "mock", "--only", addr,
+                                                                       "--max-turns", "6", "--z80tool", Z80TOOL])
+            finally:
+                mock.stop()
+            self.assertIn("answer cut off at the token limit", printed)
+            self.assertIn("--think false", printed)
+            self.assertTrue(mock.hints, "the model must be told that its answer was cut off")
+            self.assertIn("1 routines documented", printed)   # and it recovered
+
     def test_repeated_failures_get_a_hint(self):
         with tempfile.TemporaryDirectory() as d:
             sna, sym = build_snapshot(d)

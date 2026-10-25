@@ -82,10 +82,13 @@ class OllamaError(RuntimeError):
 class Ollama:
     retry_delay = 2  # seconds, multiplied by the attempt number
 
-    def __init__(self, host, model, timeout=900, think=None, num_ctx=16384, temperature=0.2):
+    def __init__(self, host, model, timeout=900, think=False, num_ctx=32768, temperature=0.7, max_tokens=4096):
         self.url = host.rstrip("/") + "/api/chat"
         self.model, self.timeout, self.think = model, timeout, think
-        self.options = {"num_ctx": num_ctx, "temperature": temperature}
+        # Qwen recommends sampling (not greedy / low temperature: that makes it repeat itself endlessly);
+        # num_predict caps one answer so that a runaway "thinking" cannot eat the whole context window.
+        self.options = {"num_ctx": num_ctx, "temperature": temperature, "top_p": 0.8, "top_k": 20, "presence_penalty": 1.0,
+                        "num_predict": max_tokens}
 
     def chat(self, messages, tools):
         body = {"model": self.model, "messages": messages, "tools": tools, "stream": False, "options": self.options}
@@ -100,6 +103,13 @@ class Ollama:
                     return json.loads(resp.read())
             except urllib.error.HTTPError as e:  # the server answered: do not retry client errors
                 detail = e.read().decode(errors="replace")[:500]
+                if e.code == 400 and "think" in detail.lower() and "think" in body:
+                    # the model has no thinking mode: ask again without the parameter, and remember
+                    self.think = None
+                    del body["think"]
+                    data = json.dumps(body).encode()
+                    last = OllamaError(detail)
+                    continue
                 if 400 <= e.code < 500:
                     raise OllamaError(f"Ollama returned HTTP {e.code}: {detail}") from e
                 last = OllamaError(f"Ollama returned HTTP {e.code}: {detail}")
@@ -494,6 +504,14 @@ How you work:
    add_comment for the non-obvious lines.
 4. Call finish_routine when done.
 
+Z80 facts that are easy to get wrong: in `OUT (C),r` and `IN r,(C)` the port address is the FULL 16-bit register pair BC (B = high byte,
+C = low byte), not just C. So `LD BC,GATE_ARRAY+&8C` / `OUT (C),C` writes the value &8C (the low byte) to the Gate Array port &7F00 - the comment
+on the OUT line already tells you what that does; trust it. `LD B,HIGH(GATE_ARRAY)` / `OUT (C),A` writes A to the Gate Array. Addresses written
+`&1234` are hexadecimal.
+
+Be brief. Do not re-derive Z80 basics and do not repeat yourself. Your FIRST reply must already be a tool call (usually run_routine). Prefer
+testing over long reasoning: a run tells you more than a page of thinking.
+
 Naming: snake_case ASCII, unique, describing purpose not address. Routines start with a verb (draw_sprite, wait_for_vsync),
 variables are nouns (player_x, lives_left), flags end in a state (sound_enabled). Never reuse register names, mnemonics or firmware
 names. Comments explain WHY and meaning, not what the instruction obviously does; keep them short. Mention units (pixels, bytes,
@@ -570,6 +588,7 @@ class Annotator:
         messages = [{"role": "system", "content": SYSTEM_PROMPT.format(lang=self.a.lang)},
                     {"role": "user", "content": self.routine_prompt(r)}]
         nudges = 0
+        cut = 0
         repeats = {}
         try:
             for turn in range(self.a.max_turns):
@@ -581,6 +600,16 @@ class Annotator:
                 echoed["role"] = "assistant"
                 messages.append(echoed)
                 calls = msg.get("tool_calls") or calls_from_content(msg.get("content"))
+                if not calls and resp.get("done_reason") == "length":
+                    # the answer hit the token limit (usually: endless thinking) - nothing usable was produced
+                    cut += 1
+                    messages.pop()  # the empty, cut-off answer carries no information: do not keep it in the context
+                    self.say(f'  answer cut off at the token limit ({cut}x); try --think false, a larger --max-tokens, or an "-instruct" model tag')
+                    if cut > 3:
+                        return False
+                    messages.append({"role": "user", "content": "Your last answer was cut off because it was too long. Do NOT deliberate: pick ONE concrete next step "
+                                                                "(for example run_routine, or document_routine) and call the tool right now."})
+                    continue
                 if not calls:
                     nudges += 1
                     if nudges > 2:
@@ -669,8 +698,11 @@ def main(argv=None):
     p.add_argument("--only", action="append", help="process only this routine address (repeatable)")
     p.add_argument("--model", default="qwen3-vl:8b", help="Ollama model tag (must support tools and images)")
     p.add_argument("--host", default=os.environ.get("OLLAMA_HOST", "http://localhost:11434"))
-    p.add_argument("--think", choices=["true", "false"], help="enable/disable the model's thinking mode (default: model default)")
-    p.add_argument("--num-ctx", type=int, default=16384)
+    p.add_argument("--think", choices=["true", "false"], default="false",
+                   help="the model's thinking mode (default false: tool calling works better and it cannot run away; ignored by models without it)")
+    p.add_argument("--num-ctx", type=int, default=32768, help="context window in tokens (listing + conversation + images)")
+    p.add_argument("--max-tokens", type=int, default=4096, help="limit for ONE model answer (with --think true use more, e.g. 12000)")
+    p.add_argument("--temperature", type=float, default=0.7, help="do not go low: Qwen models repeat themselves endlessly at low temperature")
     p.add_argument("--lang", default="English", help='language of summaries and comments, e.g. "German"')
     p.add_argument("--max-turns", type=int, default=20, help="tool-call rounds per routine")
     p.add_argument("--log", help="write every model message and tool result to this JSON-lines file")
@@ -682,7 +714,7 @@ def main(argv=None):
     server = Z80Server(find_z80tool(a.z80tool))
     log = open(a.log, "a", encoding="utf-8") if a.log else None
     try:
-        llm = Ollama(a.host, a.model, think=None if a.think is None else a.think == "true", num_ctx=a.num_ctx)
+        llm = Ollama(a.host, a.model, think=a.think == "true", num_ctx=a.num_ctx, temperature=a.temperature, max_tokens=a.max_tokens)
         worker = Annotator(server, llm, a, log)
         worker.setup()
         listing = worker.run()
