@@ -1,0 +1,6 @@
+foreach(name expression assembler decoder roundtrip disassembler image_io robustness)
+  add_executable(test_${name} test_${name}.cpp)
+  target_link_libraries(test_${name} PRIVATE z80core)
+  z80_set_warnings(test_${name})
+  add_test(NAME ${name} COMMAND test_${name})
+endforeach()
