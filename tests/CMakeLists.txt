@@ -1,4 +1,4 @@
-foreach(name expression assembler decoder roundtrip disassembler image_io robustness)
+foreach(name expression assembler decoder roundtrip disassembler image_io robustness cpu session)
   add_executable(test_${name} test_${name}.cpp)
   target_link_libraries(test_${name} PRIVATE z80core)
   z80_set_warnings(test_${name})

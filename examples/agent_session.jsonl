@@ -1,0 +1,10 @@
+{"cmd":"asm","source":"        ORG &4000\nstart:  LD B,5\n        XOR A\nloop:   ADD A,B\n        DJNZ loop\n        LD (result),A\n        CALL twice\n        HALT\ntwice:  ADD A,A\n        RET\nresult: DB 0\n","entry":"start"}
+{"cmd":"checkpoint","name":"fresh"}
+{"cmd":"break","addr":"twice"}
+{"cmd":"run"}
+{"cmd":"run_until_return"}
+{"cmd":"run"}
+{"cmd":"read","addr":"result","len":1}
+{"cmd":"diff","name":"fresh"}
+{"cmd":"rollback","name":"fresh"}
+{"cmd":"call","addr":"twice","regs":{"A":21}}

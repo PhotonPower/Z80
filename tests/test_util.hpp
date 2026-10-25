@@ -5,10 +5,17 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include "z80/format.hpp"
 #include "z80/types.hpp"
+
+template <class T>
+auto show(const T& v) {
+    if constexpr (std::is_same_v<T, unsigned char>) return static_cast<unsigned>(v);
+    else return v;
+}
 
 inline int g_failures = 0;
 inline int g_checks = 0;
@@ -30,7 +37,7 @@ inline int g_checks = 0;
         if (!(a_ == e_)) {                                                           \
             ++g_failures;                                                            \
             std::cerr << __FILE__ << ":" << __LINE__ << ": " #actual " == " #expected \
-                      << "\n   actual:   " << a_ << "\n   expected: " << e_ << "\n"; \
+                      << "\n   actual:   " << show(a_) << "\n   expected: " << show(e_) << "\n"; \
         }                                                                            \
     } while (0)
 

@@ -14,6 +14,7 @@
 #include "z80/disassembler.hpp"
 #include "z80/expression.hpp"
 #include "z80/image_io.hpp"
+#include "z80/session.hpp"
 #include "z80/version.hpp"
 
 namespace fs = std::filesystem;
@@ -34,6 +35,7 @@ void printUsage(std::ostream& out) {
         << "Usage:\n"
         << "  z80tool asm <source.asm> [options]\n"
         << "  z80tool dis <image>      [options]\n"
+        << "  z80tool serve [--allow-files]   emulator server: JSON requests on stdin, replies on stdout\n"
         << "  z80tool help | version\n"
         << "\n"
         << "asm options:\n"
@@ -232,6 +234,25 @@ int runDis(Args args) {
     return kExitOk;
 }
 
+// ---- serve -----------------------------------------------------------------------------
+
+int runServe(Args args) {
+    z80::SessionOptions options;
+    while (!args.done()) {
+        const std::string a = args.next();
+        if (a == "--allow-files") options.allowFiles = true;
+        else throw UsageError("unknown option " + a);
+    }
+    z80::Session session(options);
+    std::ios::sync_with_stdio(false);
+    std::string line;
+    while (std::getline(std::cin, line)) {
+        if (line.find_first_not_of(" \t\r") == std::string::npos) continue;
+        std::cout << session.handleLine(line) << '\n' << std::flush;
+    }
+    return kExitOk;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -243,6 +264,7 @@ int main(int argc, char** argv) {
         const std::string command = argv[1];
         if (command == "asm") return runAsm(Args(argc, argv, 2));
         if (command == "dis") return runDis(Args(argc, argv, 2));
+        if (command == "serve") return runServe(Args(argc, argv, 2));
         if (command == "version" || command == "--version") {
             std::cout << "z80tool " << z80::kVersion << "\n";
             return kExitOk;

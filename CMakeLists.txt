@@ -40,12 +40,16 @@ endfunction()
 # ---- core library ---------------------------------------------------------------------
 add_library(z80core STATIC
   src/assembler.cpp
+  src/cpu.cpp
   src/decoder.cpp
   src/disassembler.cpp
   src/encoder.cpp
   src/expression.cpp
   src/format.cpp
-  src/image_io.cpp)
+  src/image_io.cpp
+  src/json.cpp
+  src/session.cpp
+  src/snapshot.cpp)
 target_include_directories(z80core PUBLIC include)
 target_compile_features(z80core PUBLIC cxx_std_20)
 z80_set_warnings(z80core)
@@ -62,6 +66,10 @@ if(Z80_BUILD_TOOLS)
   add_executable(z80_dump_forms tools/dump_forms.cpp)
   target_link_libraries(z80_dump_forms PRIVATE z80core)
   z80_set_warnings(z80_dump_forms)
+
+  add_executable(z80_zex tools/zex_runner.cpp)
+  target_link_libraries(z80_zex PRIVATE z80core)
+  z80_set_warnings(z80_zex)
 endif()
 
 # ---- tests ----------------------------------------------------------------------------
