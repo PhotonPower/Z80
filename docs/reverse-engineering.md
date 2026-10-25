@@ -142,6 +142,12 @@ dieselbe Kette, mit der das Modell später sieht, was eine Routine am Bildschirm
   (`done_reason: length`), verwirft die Antwort und fordert einen konkreten nächsten Schritt an. Hilft das nicht:
   einen `-instruct`-Tag wählen (z. B. `qwen3-vl:8b-instruct`, Tag-Namen mit `ollama list`/Bibliothek prüfen).
   Modelle ohne Thinking-Modus werden automatisch ohne den Parameter erneut angefragt.
+- **Modelle, die trotz `--think false` denken** (reine Thinking-Varianten): Das funktioniert, ist aber langsam,
+  und jede Antwort enthält erst Tausende Token Nachdenken. Der Orchestrator erkennt das (Hinweis auf der Konsole)
+  und hebt das Antwortlimit bei jedem Abschneiden um die Hälfte an (4096 → 6144 → 9216 → … bis 16384). Schneller
+  und billiger ist ein `-instruct`-Tag; welche Tags dein Ollama kennt, zeigt `ollama list` bzw. die Modellseite.
+- **Nach `git pull` immer neu bauen** (`cmake --build build`): Idiom-Kommentare, Vollständigkeitsprüfung und
+  Protokoll stecken im C++-Teil. Ein veraltetes `z80tool` bricht mit einer entsprechenden Meldung ab.
 - **Abtastung**: Standard `--temperature 0.7`, `top_p 0.8`, `top_k 20`, `presence_penalty 1.0`. Niedrige
   Temperaturen (oder Greedy) führen bei Qwen zu endlosen Wiederholungen.
 - `--max-tokens` (Standard 4096) begrenzt **eine** Antwort, `--num-ctx` (Standard 32768) das ganze Fenster

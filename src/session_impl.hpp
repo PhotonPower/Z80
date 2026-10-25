@@ -427,7 +427,7 @@ struct Session::Impl {
             {"interrupt", "raise maskable interrupt {data?}"}, {"nmi", "raise non-maskable interrupt"},
             {"io", "fetch (and clear) the OUT log"}, {"input", "queue bytes for IN {hex | bytes[]}"},
             {"reset", "reset CPU {memory?: true clears RAM}"}, {"symbols", "list symbols from the last asm"},
-            {"help", "this list"},
+            {"help", "this list"}, {"info", "protocol version of this build"},
             {"machine", "select the machine {type:\"cpc\"}: video hardware, firmware stubs, screen"},
             {"load_sna", "load a CPC snapshot incl. registers and video state {file} (needs --allow-files)"},
             {"load_rom", "load a ROM image {file, which: lower|upper|both} (needs --allow-files)"},

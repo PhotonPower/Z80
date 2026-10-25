@@ -82,6 +82,8 @@ class OllamaError(RuntimeError):
 class Ollama:
     retry_delay = 2  # seconds, multiplied by the attempt number
 
+    max_tokens_limit = 16384  # automatic escalation stops here
+
     def __init__(self, host, model, timeout=900, think=False, num_ctx=32768, temperature=0.7, max_tokens=4096):
         self.url = host.rstrip("/") + "/api/chat"
         self.model, self.timeout, self.think = model, timeout, think
@@ -117,6 +119,14 @@ class Ollama:
                 last = OllamaError(f"cannot reach Ollama at {self.url}: {e}")
             time.sleep(self.retry_delay * (attempt + 1))
         raise last
+
+
+def check_server(server):
+    """The orchestrator relies on features of the C++ side; an old build would fail in confusing ways."""
+    reply = server.call(cmd="info")
+    if not reply.get("ok") or reply.get("protocol", 0) < 3:
+        raise ServerError("your z80tool is outdated (it lacks features this script needs, e.g. the idiom comments and the completeness check). "
+                          "Rebuild it:  cmake --build build   (after git pull)")
 
 
 # --------------------------------------------------------------------------------------------
@@ -501,7 +511,7 @@ class Tools:
             problems.append("memory locations used by number without a name: " + ", ".join("&" + a for a in numeric[:8]) +
                             (" ..." if len(numeric) > 8 else "") + " (name_variable, or mark_data for tables)")
         wanted = max(2, r["instructions"] // 10)
-        if r["user_comments"] < wanted:
+        if r.get("user_comments", wanted) < wanted:
             problems.append(f"only {r['user_comments']} comment(s) for {r['instructions']} instructions - add about {wanted} short ones with add_comment "
                             "(explain meaning and purpose of the non-obvious steps)")
         return problems
@@ -571,6 +581,8 @@ class Annotator:
         self.s, self.llm, self.a, self.log = server, ollama, args, log
         self.tools = Tools(server, irq=getattr(args, 'irq', 0))
 
+    said_thinking = False
+
     def say(self, text):
         print(text, flush=True)
 
@@ -582,6 +594,7 @@ class Annotator:
     # ---- setup ----
     def setup(self):
         a, s = self.a, self.s
+        check_server(s)
         s.ok(cmd="machine", type="cpc")
         for rom in a.rom or []:
             path, _, which = rom.partition(":")
@@ -641,6 +654,10 @@ class Annotator:
                 compact_messages(messages, max_chars=self.a.num_ctx * 3)
                 resp = self.llm.chat(messages, TOOLS)
                 msg = resp.get("message", {})
+                if msg.get("thinking") and not self.llm.think and not self.said_thinking:
+                    self.said_thinking = True
+                    self.say("  note: this model thinks even with --think false (a thinking-only model tag). It works, but slowly; "
+                             "an -instruct tag is faster. The answer limit grows automatically when it is cut off.")
                 self.log_event(routine=r["addr"], turn=turn, message=msg)
                 echoed = {k: v for k, v in msg.items() if k in ("content", "tool_calls")}
                 echoed["role"] = "assistant"
@@ -650,8 +667,13 @@ class Annotator:
                     # the answer hit the token limit (usually: endless thinking) - nothing usable was produced
                     cut += 1
                     messages.pop()  # the empty, cut-off answer carries no information: do not keep it in the context
-                    self.say(f'  answer cut off at the token limit ({cut}x); try --think false, a larger --max-tokens, or an "-instruct" model tag')
-                    if cut > 3:
+                    old = self.llm.options["num_predict"]
+                    new = min(int(old * 1.5), self.llm.max_tokens_limit)
+                    self.llm.options["num_predict"] = new  # a model that needs long thinking gets room for it
+                    self.say(f'  answer cut off at the token limit ({cut}x, {old} tokens); '
+                             + (f"raising the limit to {new}" if new > old else "limit already at the maximum") +
+                             '. Alternatives: a smaller thinking effort, or an "-instruct" model tag')
+                    if cut > 5 or (new == old and cut > 2):
                         return False
                     messages.append({"role": "user", "content": "Your last answer was cut off because it was too long. Do NOT deliberate: pick ONE concrete next step "
                                                                 "(for example run_routine, or document_routine) and call the tool right now."})

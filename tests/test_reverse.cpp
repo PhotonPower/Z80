@@ -61,6 +61,14 @@ const char* kDemo =
 }  // namespace
 
 int main() {
+    // ---- protocol version: the orchestrator refuses an outdated build ----
+    {
+        Session s;
+        const Json info = ask(s, R"({"cmd":"info"})");
+        CHECK(ok(info));
+        CHECK(info.find("protocol")->asInt() >= 3);
+    }
+
     // ---- CPC machine: run, screen, console, firmware log ----
     {
         Session s;

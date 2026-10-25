@@ -409,7 +409,11 @@ class HardeningTest(unittest.TestCase):
             finally:
                 mock.stop()
             self.assertIn("answer cut off at the token limit", printed)
-            self.assertIn("--think false", printed)
+            self.assertIn("raising the limit to 6144", printed)
+            self.assertIn("raising the limit to 9216", printed)
+            limits = [o["num_predict"] for o in mock.options_seen]
+            self.assertEqual(limits[:3], [4096, 6144, 9216])      # every cut-off gives the next answer more room
+            self.assertIn("thinks even with --think false", printed)  # the truncated mock answers carry a "thinking" field
             self.assertTrue(mock.hints, "the model must be told that its answer was cut off")
             self.assertIn("1 routines documented", printed)   # and it recovered
 
@@ -456,6 +460,27 @@ class HardeningTest(unittest.TestCase):
             finally:
                 mock.stop()
             self.assertIn("1 routines documented", printed)    # the model is never trapped by the check
+
+    def test_outdated_z80tool_is_detected(self):
+        class OldServer:
+            def call(self, **request):
+                return {"ok": False, "error": "unknown command 'info'"}
+
+        with self.assertRaises(annotate.ServerError) as ctx:
+            annotate.check_server(OldServer())
+        self.assertIn("Rebuild", str(ctx.exception))
+
+        class TooOld:
+            def call(self, **request):
+                return {"ok": True, "protocol": 2}
+
+        with self.assertRaises(annotate.ServerError):
+            annotate.check_server(TooOld())
+        server = annotate.Z80Server(Z80TOOL)  # the real build passes
+        try:
+            annotate.check_server(server)
+        finally:
+            server.close()
 
     def test_repeated_failures_get_a_hint(self):
         with tempfile.TemporaryDirectory() as d:

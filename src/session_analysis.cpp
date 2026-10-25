@@ -424,6 +424,12 @@ Json Session::Impl::cmdScreen(const std::string& cmd) {
 }
 
 bool Session::Impl::analysisCommand(const std::string& cmd, Json& result) {
+    if (cmd == "info") {
+        // protocol 3: analysis, annotations, listing with idiom comments and "user_comments", screen, CPC machine
+        result = Json::object();
+        result.set("name", "z80tool").set("protocol", 3);
+        return true;
+    }
     if (cmd == "machine") result = cmdMachine();
     else if (cmd == "video") result = cmdVideo();
     else if (cmd == "load_sna") result = cmdLoadSna();
