@@ -15,7 +15,13 @@ namespace z80 {
 Session::Session(SessionOptions options)
     : options_(options), memoryStore_(std::make_unique<Memory>()), memory_(*memoryStore_), cpu_(memory_) {
     cpu_.setPortHandlers(
-        [this](Word) -> Byte {
+        [this](Word port) -> Byte {
+            if (cpc_ && input_.empty()) {
+                // PPI port B (&F5xx): bit 0 = vertical sync, bits 1-3 = 111 (Amstrad), 50 Hz, expansion and printer idle.
+                // A frame takes 312 lines * 64 us = 79872 T-states; the sync pulse lasts about 16 lines.
+                const unsigned high = port >> 8;
+                if ((high & 0x08) == 0 && (high & 3) == 1) return static_cast<Byte>(0x7E | (cpu_.cycles() % 79872 < 4096 ? 1 : 0));
+            }
             if (input_.empty()) return 0xFF;
             const Byte b = input_.front();
             input_.pop_front();

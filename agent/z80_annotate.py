@@ -166,6 +166,133 @@ TOOLS = [
 # helpers
 
 
+def _coerce(value, schema):
+    """Converts a model-supplied value to the JSON type the schema asks for (models are sloppy about this)."""
+    kind = schema.get("type")
+    if kind == "boolean":
+        if isinstance(value, str):
+            low = value.strip().lower()
+            if low in ("true", "yes", "1"):
+                return True
+            if low in ("false", "no", "0", ""):
+                return False
+            raise ValueError(f"expected true or false, got {value!r}")
+        return bool(value)
+    if kind == "integer":
+        if isinstance(value, bool):
+            raise ValueError("expected a number")
+        if isinstance(value, float) and value.is_integer():
+            return int(value)
+        if isinstance(value, str):
+            try:
+                return int(value.strip(), 0)
+            except ValueError:
+                raise ValueError(f"expected a number, got {value!r}") from None
+        if isinstance(value, int):
+            return value
+        raise ValueError(f"expected a number, got {value!r}")
+    if kind in ("object", "array"):
+        if isinstance(value, str):  # JSON written as a string
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                raise ValueError(f"expected {kind} (JSON), got text") from None
+        if kind == "object" and not isinstance(value, dict) or kind == "array" and not isinstance(value, list):
+            raise ValueError(f"expected {kind}")
+        return value
+    if kind == "string":
+        if schema is ADDR and isinstance(value, (int, float)) and not isinstance(value, bool):
+            return int(value)  # a JSON number is a decimal address; it must not turn into a "hex" string
+        return value if isinstance(value, str) else str(value)
+    return value
+
+
+def prepare_args(tool_name, args):
+    """Validates and normalises tool arguments against the tool's schema.
+
+    Returns (clean_args, notes). Unknown arguments are dropped with a note; wrong types are converted when
+    that is unambiguous. Raises ValueError with a message the model can act on.
+    """
+    spec = next((t["function"] for t in TOOLS if t["function"]["name"] == tool_name), None)
+    if spec is None:
+        raise ValueError(f"unknown tool '{tool_name}'. Available tools: " + ", ".join(t["function"]["name"] for t in TOOLS))
+    props = spec["parameters"]["properties"]
+    required = spec["parameters"].get("required", [])
+    clean, notes = {}, []
+    for key, value in args.items():
+        if key not in props:
+            notes.append(f"ignored unknown argument '{key}' (valid: {', '.join(props) or 'none'})")
+            continue
+        if value is None:
+            continue
+        try:
+            clean[key] = _coerce(value, props[key])
+        except ValueError as e:
+            raise ValueError(f"argument '{key}': {e}") from None
+    missing = [k for k in required if k not in clean]
+    if missing:
+        raise ValueError(f"missing required argument(s): {', '.join(missing)}. Valid arguments: {', '.join(props)}")
+    return clean, notes
+
+
+def clean_tool_name(name):
+    """'functions.run_routine', 'run_routine()' and 'Run_Routine' all mean run_routine."""
+    name = (name or "").strip().rstrip("()").split(".")[-1]
+    known = {t["function"]["name"] for t in TOOLS}
+    if name in known:
+        return name
+    return name.lower() if name.lower() in known else name
+
+
+_TOOL_CALL_TAG = re.compile(r"<tool_call>\s*(.*?)\s*(?:</tool_call>|$)", re.S)
+
+
+def calls_from_content(content):
+    """Some chat templates make the model write the call as text instead of using `tool_calls`.
+
+    Understands <tool_call>{"name": ..., "arguments": {...}}</tool_call> and a bare JSON object (optionally in a
+    ```json fence) with the same keys. Returns a list of {"function": {...}} dicts (empty if there is none).
+    """
+    if not content:
+        return []
+    candidates = _TOOL_CALL_TAG.findall(content)
+    if not candidates:
+        fenced = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.S)
+        candidates = fenced or ([content.strip()] if content.strip().startswith("{") else [])
+    calls = []
+    for text in candidates:
+        try:
+            obj = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        for item in obj if isinstance(obj, list) else [obj]:
+            if isinstance(item, dict) and isinstance(item.get("name"), str) and "arguments" in item:
+                calls.append({"function": {"name": item["name"], "arguments": item["arguments"]}})
+    return calls
+
+
+def compact_messages(messages, max_chars, keep_images=2):
+    """Keeps the conversation within a size budget.
+
+    Images are the first thing to go (only the newest `keep_images` stay), then the oldest tool results are
+    shortened. The system prompt, the task and the most recent exchange are never touched.
+    """
+    with_images = [m for m in messages if m.get("images")]
+    for m in with_images[:-keep_images] if keep_images else with_images:
+        m["content"] = (m.get("content") or "") + " [image removed to save context]"
+        del m["images"]
+
+    def size():
+        return sum(len(m.get("content") or "") + sum(len(i) for i in m.get("images", [])) // 20 for m in messages)
+
+    for m in messages[2:-4]:
+        if size() <= max_chars:
+            break
+        if m["role"] == "tool" and len(m["content"]) > 200:
+            m["content"] = m["content"][:150] + " ... [older tool output removed to save context]"
+    return messages
+
+
 def norm_addr(value):
     """Normalise an address argument given by the model. Strings of 3-4 bare hex digits are hex."""
     if isinstance(value, bool):
@@ -191,8 +318,9 @@ def trim(text, limit):
 
 
 class Tools:
-    def __init__(self, server):
+    def __init__(self, server, irq=0):
         self.s = server
+        self.irq = irq
         self.images = []           # base64 PNGs waiting to be shown to the model
         self.finished = False
 
@@ -201,13 +329,21 @@ class Tools:
         self.finished = False
 
     def dispatch(self, name, args):
+        name = clean_tool_name(name)
+        if isinstance(args, str):
+            try:
+                args = json.loads(args) if args.strip() else {}
+            except json.JSONDecodeError:
+                return "error: arguments must be a JSON object"
         if not isinstance(args, dict):
             return "error: arguments must be an object"
         try:
+            clean, notes = prepare_args(name, args)
             fn = getattr(self, "t_" + name, None)
             if fn is None:
                 return f"error: unknown tool '{name}'"
-            return fn(**args)
+            result = fn(**clean)
+            return result + ("\n(" + "; ".join(notes) + ")" if notes else "")
         except TypeError as e:
             return f"error: bad arguments for {name}: {e}"
         except (ServerError, ValueError) as e:
@@ -233,13 +369,17 @@ class Tools:
         s = self.s
         s.ok(cmd="rollback", name="baseline")
         for m in memory or []:
-            s.ok(cmd="write", addr=norm_addr(m["addr"]), hex=m["hex"])
+            if not isinstance(m, dict) or "addr" not in m or "hex" not in m:
+                raise ValueError('each memory entry needs "addr" and "hex"')
+            digits = re.sub(r"0x|[\s,]", "", str(m["hex"]), flags=re.I)
+            s.ok(cmd="write", addr=norm_addr(m["addr"]), hex=digits)
         regs = {k: (norm_addr(v) if isinstance(v, str) else v) for k, v in (registers or {}).items()}
         s.ok(cmd="firmware_log", clear=True)
         s.ok(cmd="console", clear=True)
         s.ok(cmd="io")
         s.ok(cmd="screen", name="_before")
-        reply = s.call(cmd="call", addr=norm_addr(addr), regs=regs, max_instructions=int(max_instructions))
+        limit = max(1, min(int(max_instructions), 5_000_000))  # a runaway loop must not stall the whole analysis
+        reply = s.call(cmd="call", addr=norm_addr(addr), regs=regs, max_instructions=limit, irq_every_cycles=self.irq)
         if not reply.get("ok"):
             return f"error: {reply.get('error')}"
         out = [f'stop: {reply["stop"]}  returned: {reply.get("returned")}  instructions: {reply["instructions"]}  T-states: {reply["cycles"]}']
@@ -366,7 +506,7 @@ Write all summaries and comments in {lang}.
 class Annotator:
     def __init__(self, server, ollama, args, log=None):
         self.s, self.llm, self.a, self.log = server, ollama, args, log
-        self.tools = Tools(server)
+        self.tools = Tools(server, irq=getattr(args, 'irq', 0))
 
     def say(self, text):
         print(text, flush=True)
@@ -379,19 +519,25 @@ class Annotator:
     # ---- setup ----
     def setup(self):
         a, s = self.a, self.s
+        s.ok(cmd="machine", type="cpc")
+        for rom in a.rom or []:
+            path, _, which = rom.partition(":")
+            s.ok(cmd="load_rom", file=path, which=which or "lower")
+        if a.boot:
+            if not a.rom:
+                raise ServerError("--boot needs a firmware ROM (--rom FILE:both)")
+            s.ok(cmd="set", regs={"PC": 0, "SP": "0xBFFF"})
+            r = s.ok(cmd="run", irq_every_cycles=13312, max_instructions=a.boot_instructions)
+            self.say(f'firmware booted ({r["instructions"]} instructions, stop: {r["stop"]})')
         if a.sna:
             r = s.ok(cmd="load_sna", file=a.sna)
             self.say(f'snapshot loaded, PC={r["regs"]["PC"]}, screen mode {r["video"]["mode"]}')
         else:
-            s.ok(cmd="machine", type="cpc")
             s.ok(cmd="load_file", file=a.bin, addr=a.org)
-        for rom in a.rom or []:
-            path, _, which = rom.partition(":")
-            s.ok(cmd="load_rom", file=path, which=which or "lower")
         if a.project and os.path.exists(a.project):
             n = s.ok(cmd="ann_load", file=a.project)["labels"]
             self.say(f"project loaded ({n} labels)")
-        entries = a.entry or [s.ok(cmd="regs")["regs"]["PC"]]
+        entries = a.entry or ([a.org] if a.bin else [s.ok(cmd="regs")["regs"]["PC"]])
         extra = {"inline_strings": a.inline_string} if a.inline_string else {}
         r = s.ok(cmd="analyze", entries=entries, **extra)
         self.say(f'analysed {r["instructions"]} instructions, {r["from"]}-{r["to"]}')
@@ -424,15 +570,17 @@ class Annotator:
         messages = [{"role": "system", "content": SYSTEM_PROMPT.format(lang=self.a.lang)},
                     {"role": "user", "content": self.routine_prompt(r)}]
         nudges = 0
+        repeats = {}
         try:
             for turn in range(self.a.max_turns):
+                compact_messages(messages, max_chars=self.a.num_ctx * 3)
                 resp = self.llm.chat(messages, TOOLS)
                 msg = resp.get("message", {})
                 self.log_event(routine=r["addr"], turn=turn, message=msg)
                 echoed = {k: v for k, v in msg.items() if k in ("content", "tool_calls")}
                 echoed["role"] = "assistant"
                 messages.append(echoed)
-                calls = msg.get("tool_calls") or []
+                calls = msg.get("tool_calls") or calls_from_content(msg.get("content"))
                 if not calls:
                     nudges += 1
                     if nudges > 2:
@@ -442,13 +590,13 @@ class Annotator:
                     continue
                 for call in calls:
                     fn = call.get("function", {})
-                    name, args = fn.get("name", ""), fn.get("arguments", {})
-                    if isinstance(args, str):
-                        try:
-                            args = json.loads(args)
-                        except json.JSONDecodeError:
-                            args = {}
+                    name, args = clean_tool_name(fn.get("name", "")), fn.get("arguments", {})
                     result = t.dispatch(name, args)
+                    key = (name, json.dumps(args, sort_keys=True, default=str))
+                    if result.startswith("error"):
+                        repeats[key] = repeats.get(key, 0) + 1
+                        if repeats[key] >= 3:
+                            result += "\nYou have made this same failing call several times. Change your approach."
                     self.log_event(routine=r["addr"], tool=name, args=args, result=trim(result, 2000))
                     messages.append({"role": "tool", "tool_name": name, "content": trim(result, 6000)})
                 if t.images:
@@ -512,6 +660,10 @@ def main(argv=None):
     p.add_argument("--entry", action="append", help='entry point (repeatable), default: PC of the snapshot, e.g. "0x4000"')
     p.add_argument("--inline-string", action="append", help="routine that is followed by an inline string (bit-7 terminated), repeatable")
     p.add_argument("--rom", action="append", help="ROM image as FILE:lower|upper|both (without it the firmware calls are stubbed)")
+    p.add_argument("--boot", action="store_true", help="cold-start the firmware from the ROM first (for --bin; the snapshot already contains a running machine)")
+    p.add_argument("--boot-instructions", type=int, default=30_000_000, help="instructions to run while booting")
+    p.add_argument("--irq", type=int, default=0, metavar="CYCLES",
+                   help="raise an interrupt every CYCLES T-states while routines run (CPC: 13312 = 300 Hz); 0 = never")
     p.add_argument("--project", help="annotation file (JSON); loaded if present, saved after every routine")
     p.add_argument("--out", help="write the final annotated listing here")
     p.add_argument("--only", action="append", help="process only this routine address (repeatable)")

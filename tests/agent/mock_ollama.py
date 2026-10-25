@@ -40,7 +40,14 @@ class MockOllama:
         plan = self.plans.get(addr, [])
         if turn >= len(plan):
             return {"role": "assistant", "content": "I am done."}
-        calls = [{"function": {"name": n, "arguments": a}} for n, a in plan[turn]]
+        entry = plan[turn]
+        if isinstance(entry, dict):  # {"as_text": [...]} / {"json_string": [...]}: sloppy ways to call tools
+            if "as_text" in entry:  # template mismatch: the call is written into the message instead of tool_calls
+                text = "".join("<tool_call>\n" + json.dumps({"name": n, "arguments": a}) + "\n</tool_call>" for n, a in entry["as_text"])
+                return {"role": "assistant", "content": "Let me do that.\n" + text}
+            calls = [{"function": {"name": n, "arguments": json.dumps(a)}} for n, a in entry["json_string"]]  # arguments as a string
+            return {"role": "assistant", "content": "", "tool_calls": calls}
+        calls = [{"function": {"name": n, "arguments": a}} for n, a in entry]
         return {"role": "assistant", "content": "", "tool_calls": calls}
 
     # -- HTTP plumbing --

@@ -7,6 +7,9 @@ die Versionierung an [Semantic Versioning](https://semver.org/lang/de/).
 ## [Unreleased]
 
 ### Hinzugefügt
+- Echte CPC-6128-Firmware läuft: Kaltstart bis „BASIC 1.1 Ready“ (PPI-Vsync, 300-Hz-Interrupts), Test in der CI
+  (ROM wird dort geladen, nicht eingecheckt). Orchestrator: `--boot`, `--irq`, tolerante Argumentverarbeitung,
+  Aufrufe als Text, Wiederholungserkennung, Kontextverdichtung.
 - **Kommentieren mit lokalem LLM**: `agent/z80_annotate.py` (Ollama, Tool-Calling, Screenshots als Bilder),
   Annotationsmodell (`z80::Annotations`), **verifiziertes** Listing (`renderListing`: Namen, Routinenköpfe,
   Datenregionen, `EQU`-Blöcke; wird neu assembliert und mit dem Speicher verglichen).

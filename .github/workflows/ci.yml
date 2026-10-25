@@ -54,6 +54,18 @@ jobs:
       - name: Compare decoder and assembler output
         run: python3 tools/crosscheck_z80asm.py build/z80_dump_forms
 
+  firmware:
+    name: Real CPC firmware (cold start)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --target z80tool
+      - name: Fetch the CPC 6128 ROM (shipped with Caprice32 by permission of Amstrad; not stored in this repository)
+        run: curl -sSL -o cpc6128.rom https://raw.githubusercontent.com/ColinPitrat/caprice32/master/rom/cpc6128.rom
+      - name: Boot the firmware and draw text
+        run: CPC_ROM=$PWD/cpc6128.rom Z80TOOL=$PWD/build/z80tool python3 -m unittest -v tests/agent/test_firmware.py
+
   zex:
     name: ZEXDOC / ZEXALL (Z80 instruction exerciser)
     runs-on: ubuntu-latest

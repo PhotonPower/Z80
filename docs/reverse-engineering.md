@@ -66,6 +66,8 @@ python3 agent/z80_annotate.py --sna spiel.sna --project spiel.z80proj.json --out
 | `--entry ADR` (mehrfach) | Einsprungpunkte (Standard: PC aus dem Snapshot) |
 | `--inline-string ADR` (mehrfach) | Routinen, hinter deren `CALL` ein Text steht (letztes Zeichen Bit 7) |
 | `--rom DATEI:lower\|upper\|both` | echte Firmware benutzen statt der Stubs (siehe unten) |
+| `--boot`, `--boot-instructions N` | Firmware vor dem Laden per Kaltstart hochfahren (für `--bin`) |
+| `--irq ZYKLEN` | während `run_routine` alle ZYKLEN T-States einen Interrupt auslösen (CPC: 13312) |
 | `--project DATEI` | Annotationen; wird geladen, falls vorhanden, und nach **jeder Routine** gespeichert → Abbrechen und Fortsetzen ist möglich |
 | `--out DATEI` | fertiges, verifiziertes Listing |
 | `--only ADR` | nur diese Routine bearbeiten (zum Ausprobieren) |
@@ -102,8 +104,21 @@ Ohne `--rom` fängt der Emulator Aufrufe der Firmware-Sprungleiste (`&B900-&BDFF
 *was* ein Programm von der Firmware will. Zeichen werden **nicht** gemalt (ohne ROM gibt es keinen
 Zeichensatz), Tastaturabfragen liefern nichts.
 
-Mit `--rom os6128.rom:lower` (und z. B. `basic.rom:upper`) läuft die echte Firmware. Die ROMs blendet
-das Gate Array wie auf der Hardware ein und aus. Du brauchst dafür deine eigenen ROM-Abbilder.
+Mit `--rom DATEI:both` (ein 32-KiB-Abbild: unteres ROM + BASIC) bzw. `--rom os.rom:lower --rom basic.rom:upper`
+läuft die **echte Firmware**; die ROMs blendet das Gate Array wie auf der Hardware ein und aus.
+
+Das ist nicht nur behauptet, sondern getestet: Mit dem ROM der CPC 6128 (liegt dem Emulator Caprice32 bei;
+Amstrad hat die Weitergabe für Emulatoren erlaubt – das ROM ist **nicht** Teil dieses Repositorys) bootet
+der Emulator per Kaltstart bis *„Amstrad 128K Microcomputer (v3) … BASIC 1.1 … Ready“* (30 Millionen Befehle,
+Vsync am PPI und 300-Hz-Interrupts werden nachgebildet). Ein anschließender Aufruf von `TXT_OUTPUT` mit `A="Z"`
+zeichnet das Zeichen mit dem echten Zeichensatz, und `screen_diff`/`screen` zeigen genau diese Stelle –
+dieselbe Kette, mit der das Modell später sieht, was eine Routine am Bildschirm verändert
+(`tests/agent/test_firmware.py`, läuft in der CI).
+
+- Ein Snapshot enthält schon eine laufende Firmware (RAM-Variablen); dann genügt `--rom`.
+- Für ein rohes Binary (`--bin`) ohne Snapshot startet `--boot` zuerst die Firmware per Kaltstart.
+- Routinen, die auf Interrupts angewiesen sind (Zeitgeber, Tastaturabfrage der Firmware), brauchen
+  `--irq 13312` (ein Interrupt alle 13 312 T-States ≈ 300 Hz).
 
 ## Qwen3-VL über Ollama – Hinweise
 
@@ -118,12 +133,27 @@ das Gate Array wie auf der Hardware ein und aus. Du brauchst dafür deine eigene
 - Wenn das Modell lange „denkt“ und die Tool-Aufrufe darunter leiden, probiere `--think false`.
 - Beobachte `--log`: Dort siehst du, welche Tests das Modell gemacht und was es daraus geschlossen hat.
 
+## Robustheit gegenüber dem Modell
+
+Echte Modelle machen Formatfehler; der Orchestrator fängt die häufigen ab (alles in `tests/agent`):
+
+- Zahlen/Booleans als Strings (`"false"`, `"500"`), verschachteltes JSON als String, Argumente als
+  JSON-Text, unbekannte Zusatzargumente (werden gemeldet und ignoriert), Namen wie `functions.run_routine`
+- Aufrufe, die das Modell als Text schreibt (`<tool_call>{"name": …}</tool_call>`, ```json-Block)
+  statt in `tool_calls`
+- Fehlversuche bekommen eine Erklärung, nach dreimal derselben Fehlermeldung einen Hinweis
+- begrenzter Kontext: Bilder werden bis auf die neuesten zwei entfernt, alte Tool-Ergebnisse gekürzt
+- `run_routine` ist auf 5 Millionen Befehle begrenzt; Endlosschleifen halten an
+- das Listing ist am Ende **immer** korrekt, auch wenn das Modell nichts oder Unsinn liefert
+
 ## Grenzen
 
 - Nur flache 64 KiB (128K-Banking der CPC 6128 fehlt), nur Modi 0–2, kein Blinken, kein CRTC-Timing,
   keine Tastatur/Joystick/Sound/Floppy.
-- Interrupts werden nur auf Wunsch periodisch ausgelöst (`irq_every_cycles`, ca. 13 300 T-States
-  für 300 Hz); der Orchestrator nutzt das derzeit nicht.
+- Interrupts werden nur auf Wunsch periodisch ausgelöst (`irq_every_cycles` bzw. `--irq`); die Tastatur
+  liefert „keine Taste“, Eingaben an laufende Programme gibt es noch nicht.
+- Der Vsync des PPI ist ein einfaches Zeitmodell (79 872 T-States je Bild); Programme, die auf exakte
+  Rasterpositionen warten, laufen damit nicht korrekt.
 - Die Analyse folgt Sprüngen statisch; Code, der nur über berechnete Sprünge (`JP (HL)`) erreicht wird,
   muss als weiterer `--entry` angegeben werden.
 - Die Qualität der Namen und Kommentare hängt am Modell. Das Verfahren stellt nur sicher, dass sie das

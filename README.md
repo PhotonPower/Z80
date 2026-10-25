@@ -44,7 +44,8 @@ für einen lokalen LLM-Agenten gedacht; geplant ist außerdem der Ausbau zu eine
 - Ergebnis: ein kommentiertes Listing mit sinnvollen Namen, Firmware-Aufrufen (`CALL TXT_OUTPUT`) und
   Hardware-Zugriffen (`GATE_ARRAY+&8D`, mit Erklärung) als Symbole – **neu assembliert und Byte für Byte
   verifiziert**, das Modell kann den Code also nicht verändern
-- Amstrad CPC: 231 Firmware-Einträge, Gate Array/CRTC/PPI, Videorendering (Modi 0–2), Snapshots, ROMs
+- Amstrad CPC: 231 Firmware-Einträge, Gate Array/CRTC/PPI, Videorendering (Modi 0–2), Snapshots, ROMs;
+  **die echte 6128-Firmware bootet bis „Ready“** und zeichnet Text, den das Modell dann als Bild sieht
 
 **Monitor** ([docs/monitor.md](docs/monitor.md)) – `z80tool monitor`
 - klassische Eingabeschleife mit Hex-Standard: disassemblieren (`d`), Speicher ansehen/ändern/

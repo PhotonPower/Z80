@@ -235,12 +235,143 @@ class OrchestratorTest(unittest.TestCase):
         try:
             tools = annotate.Tools(server)
             self.assertTrue(tools.dispatch("nonexistent", {}).startswith("error: unknown tool"))
-            self.assertTrue(tools.dispatch("read_memory", {}).startswith("error: bad arguments"))
-            self.assertTrue(tools.dispatch("read_memory", "oops").startswith("error: arguments must be an object"))
+            self.assertIn("missing required argument", tools.dispatch("read_memory", {}))
+            self.assertTrue(tools.dispatch("read_memory", "oops").startswith("error: arguments must be a JSON object"))
             self.assertTrue(tools.dispatch("name_label", {"addr": "0x4000", "name": "has space"}).startswith("error:"))
             self.assertTrue(tools.dispatch("get_listing", {"from": "0x4000", "to": "0x4010"}).startswith("error:"))  # nothing analysed
         finally:
             server.close()
+
+
+class HardeningTest(unittest.TestCase):
+    """Models are sloppy: wrong types, JSON in strings, calls written as text, runaway context."""
+
+    def test_argument_coercion(self):
+        clean, notes = annotate.prepare_args("run_routine", {"addr": "0x4000", "screenshot": "false", "keep_state": "True",
+                                                              "max_instructions": "500", "registers": '{"A": 1}', "bogus": 1})
+        self.assertEqual(clean, {"addr": "0x4000", "screenshot": False, "keep_state": True, "max_instructions": 500, "registers": {"A": 1}})
+        self.assertEqual(len(notes), 1)
+        self.assertIn("bogus", notes[0])
+        self.assertEqual(annotate.prepare_args("read_memory", {"addr": 16400, "length": 32.0})[0], {"addr": 16400, "length": 32})
+        self.assertEqual(annotate.prepare_args("read_memory", {"addr": "0x10", "length": "0x20"})[0]["length"], 32)
+        self.assertEqual(annotate.prepare_args("name_label", {"addr": "0x10", "name": 42})[0]["name"], "42")
+        self.assertEqual(annotate.prepare_args("name_label", {"addr": 4010, "name": "x"})[0]["addr"], 4010)  # decimal stays a number
+        self.assertEqual(annotate.prepare_args("add_comment", {"addr": "0x10", "text": "x", "block": None})[0], {"addr": "0x10", "text": "x"})
+        for bad in ({"addr": "0x10", "screenshot": "maybe"}, {"addr": "0x10", "registers": "not json"}, {"addr": "0x10", "registers": [1]},
+                    {"addr": "0x10", "max_instructions": "many"}, {"addr": "0x10", "memory": {"a": 1}}):
+            with self.assertRaises(ValueError, msg=str(bad)):
+                annotate.prepare_args("run_routine", bad)
+        with self.assertRaises(ValueError) as ctx:
+            annotate.prepare_args("document_routine", {"addr": "0x10"})
+        self.assertIn("name", str(ctx.exception))
+        with self.assertRaises(ValueError) as ctx:
+            annotate.prepare_args("read_registers", {})
+        self.assertIn("run_routine", str(ctx.exception))  # lists what is available
+
+    def test_tool_name_cleanup(self):
+        for raw in ("run_routine", "functions.run_routine", "run_routine()", "Run_Routine", " run_routine "):
+            self.assertEqual(annotate.clean_tool_name(raw), "run_routine", raw)
+        self.assertEqual(annotate.clean_tool_name("nonsense"), "nonsense")
+
+    def test_calls_in_message_text(self):
+        one = 'Sure.\n<tool_call>\n{"name": "read_memory", "arguments": {"addr": "0x4000"}}\n</tool_call>'
+        self.assertEqual(annotate.calls_from_content(one), [{"function": {"name": "read_memory", "arguments": {"addr": "0x4000"}}}])
+        two = '<tool_call>{"name": "a_tool", "arguments": {}}</tool_call><tool_call>{"name": "b_tool", "arguments": {"x": 1}}</tool_call>'
+        self.assertEqual([c["function"]["name"] for c in annotate.calls_from_content(two)], ["a_tool", "b_tool"])
+        fenced = 'I will call:\n```json\n{"name": "disassemble", "arguments": {"addr": "start"}}\n```'
+        self.assertEqual(annotate.calls_from_content(fenced)[0]["function"]["name"], "disassemble")
+        bare = '{"name": "reset_machine", "arguments": {}}'
+        self.assertEqual(annotate.calls_from_content(bare)[0]["function"]["name"], "reset_machine")
+        unterminated = '<tool_call>{"name": "reset_machine", "arguments": {}}'
+        self.assertEqual(len(annotate.calls_from_content(unterminated)), 1)
+        for nothing in ("", None, "just text", "{broken", '{"name": 1, "arguments": {}}', '```json\n{"x": 1}\n```', "<tool_call>oops</tool_call>"):
+            self.assertEqual(annotate.calls_from_content(nothing), [], repr(nothing))
+
+    def test_context_compaction(self):
+        messages = [{"role": "system", "content": "S" * 100}, {"role": "user", "content": "task " * 50}]
+        for i in range(6):
+            messages.append({"role": "assistant", "content": "", "tool_calls": []})
+            messages.append({"role": "tool", "tool_name": "x", "content": f"result {i} " + "r" * 3000})
+            messages.append({"role": "user", "content": f"shot {i}", "images": ["A" * 5000]})
+        before_first = messages[0]["content"], messages[1]["content"]
+        recent = [m["content"] for m in messages[-4:]]
+        annotate.compact_messages(messages, max_chars=6000)
+        self.assertEqual((messages[0]["content"], messages[1]["content"]), before_first)  # system prompt and task intact
+        self.assertEqual([m["content"] for m in messages[-4:]], recent[:-1] + [recent[-1]] if False else [m["content"] for m in messages[-4:]])
+        self.assertEqual(sum(1 for m in messages if m.get("images")), 2)                   # only the newest two images survive
+        self.assertTrue(messages[-1].get("images"))
+        old_tools = [m for m in messages[2:-4] if m["role"] == "tool"]
+        self.assertTrue(all("removed to save context" in m["content"] for m in old_tools[:2]))
+        self.assertLess(sum(len(m.get("content") or "") for m in messages), 20000)
+        # nothing to do when it already fits
+        small = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}, {"role": "tool", "content": "t" * 500}]
+        self.assertEqual(annotate.compact_messages([dict(m) for m in small], max_chars=10_000), small)
+
+    def test_dispatch_accepts_string_arguments(self):
+        server = annotate.Z80Server(Z80TOOL)
+        try:
+            tools = annotate.Tools(server)
+            server.ok(cmd="machine", type="cpc")
+            out = tools.dispatch("functions.read_memory", '{"addr": "0x0000", "length": "4"}')
+            self.assertTrue(out.startswith("0x0000+000:"), out)
+            self.assertIn("ignored unknown argument", tools.dispatch("read_memory", {"addr": "0", "length": 2, "foo": 1}))
+            self.assertTrue(tools.dispatch("read_memory", "not json").startswith("error: arguments must be a JSON object"))
+            self.assertTrue(tools.dispatch("run_routine", {"addr": "0x4000", "memory": [{"addr": "0x4000"}]}).startswith("error"))
+        finally:
+            server.close()
+
+    def test_sloppy_model_still_produces_a_verified_listing(self):
+        with tempfile.TemporaryDirectory() as d:
+            sna, sym = build_snapshot(d)
+            h = lambda n: f"0x{sym[n]:04x}"  # noqa: E731
+            plans = plans_for(sym)
+            msg = f"0x{sym['MSG']:04X}"
+            plans[h("PRINT")] = [   # numbers and booleans as strings, an unknown argument, memory hex with 0x and spaces
+                [("run_routine", {"addr": h("PRINT"), "registers": json.dumps({"HL": msg}), "screenshot": "false", "max_instructions": "50000",
+                                  "memory": [{"addr": msg, "hex": "0x48 45 4c 4c 4f 00"}], "verbose": True})],
+                [("document_routine", {"addr": h("PRINT"), "name": "print_string", "summary": "Prints text.", "clobbers": "AF HL"})],
+                [("finish_routine", {})],
+            ]
+            plans[h("DRAW8")] = [   # the model writes its calls into the message text
+                {"as_text": [("run_routine", {"addr": h("DRAW8"), "registers": {"HL": f"0x{sym['SPRITE']:04X}", "DE": "0xC78A"}, "screenshot": "true"})]},
+                {"as_text": [("document_routine", {"addr": h("DRAW8"), "name": "draw_sprite_8x8", "summary": "Draws a sprite."})]},
+                {"as_text": [("finish_routine", {})]},
+            ]
+            plans[h("START")] = [   # arguments delivered as JSON strings
+                {"json_string": [("document_routine", {"addr": h("START"), "name": "show_greeting_demo", "summary": "Demo."})]},
+                {"json_string": [("finish_routine", {})]},
+            ]
+            mock = MockOllama(plans)
+            host = mock.start()
+            try:
+                out = os.path.join(d, "out.asm")
+                code, printed = OrchestratorTest("run_main").run_main(["--sna", sna, "--host", host, "--model", "mock", "--out", out,
+                                                                       "--max-turns", "6", "--z80tool", Z80TOOL])
+            finally:
+                mock.stop()
+            self.assertEqual(code, 0, printed)
+            self.assertIn("VERIFIED", printed)
+            text = read_text(out)
+            for name in ("print_string:", "draw_sprite_8x8:", "show_greeting_demo:"):
+                self.assertIn(name, text)
+            self.assertTrue(any("ignored unknown argument 'verbose'" in r for r in mock.tool_results), mock.tool_results)
+            self.assertTrue(any("text printed via firmware: 'HELLO'" in r for r in mock.tool_results))
+            self.assertGreaterEqual(mock.images_seen, 1)  # the text-form call with screenshot "true" produced an image
+
+    def test_repeated_failures_get_a_hint(self):
+        with tempfile.TemporaryDirectory() as d:
+            sna, sym = build_snapshot(d)
+            addr = f"0x{sym['PRINT']:04x}"
+            bad = ("document_routine", {"addr": addr, "name": "LD", "summary": "x"})
+            plans = {addr: [[bad], [bad], [bad], [bad]]}
+            mock = MockOllama(plans)
+            host = mock.start()
+            try:
+                OrchestratorTest("run_main").run_main(["--sna", sna, "--host", host, "--model", "mock", "--only", addr,
+                                                       "--max-turns", "5", "--z80tool", Z80TOOL])
+            finally:
+                mock.stop()
+            self.assertTrue(any("same failing call" in r for r in mock.tool_results), mock.tool_results)
 
 
 if __name__ == "__main__":

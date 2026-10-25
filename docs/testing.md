@@ -24,6 +24,7 @@ Die Tests brauchen kein externes Framework; `tests/test_util.hpp` stellt `CHECK`
 | `cpc`              | Firmware-Tabelle (231 Einträge, keine Doppelten, dichte Sprungleiste, `SCR_FLOOD_BOX`), Farben, Port-Ausdrücke und -Beschreibungen, Videozustand aus Port-Schreibzugriffen, Pixeldekodierung der Modi 0/1/2, Speicherlayout, Scrolling, Rand, Bildvergleich, Ausschnitt/Zoom, PNG (Chunk-CRCs unabhängig geprüft), Base64, `.sna`-Header |
 | `listing`          | Annotationsregeln (Namen, Duplikate, reservierte Wörter, JSON), Listing mit/ohne Annotationen **mit Neu-Assemblieren-Prüfung**, Hardware-Kommentare, Teilbereiche, abgeschnittene Befehle, `DS`-Läufe, Bit-7-Text |
 | `reverse`          | Session-Befehle: CPC-Lauf mit Firmware-Stubs, Screenshot/Diff/Zoom, Routinenliste, Annotationen, Listing, Dateien (Snapshot, ROM-Überlagerung, Annotationen), Interrupts, Video-Rollback |
+| `agent` (Firmware) | optional (`CPC_ROM`): **echte CPC-6128-Firmware** bootet bis zum BASIC-Prompt, `TXT_OUTPUT` zeichnet ein Zeichen, `screen_diff` findet es, Rollback macht alles rückgängig; die CI lädt das ROM zur Laufzeit |
 | `agent`            | Python: Orchestrator gegen einen **scripteten Mock-Ollama** und den echten `z80tool serve`: Bilder erreichen das Modell, Fehlertexte werden zurückgemeldet, Reihenfolge bottom-up, Wiederaufnahme, nie endendes Modell, nicht erreichbarer Server |
 
 Der Roundtrip-Test beweist die Konsistenz von Dekoder und Assembler **untereinander**. Gegen
