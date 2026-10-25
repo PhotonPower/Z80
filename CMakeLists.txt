@@ -39,7 +39,10 @@ endfunction()
 
 # ---- core library ---------------------------------------------------------------------
 add_library(z80core STATIC
+  src/annotations.cpp
   src/assembler.cpp
+  src/cpc.cpp
+  src/cpc_data.cpp
   src/cpu.cpp
   src/decoder.cpp
   src/disassembler.cpp
@@ -48,8 +51,11 @@ add_library(z80core STATIC
   src/format.cpp
   src/image_io.cpp
   src/json.cpp
+  src/listing.cpp
   src/monitor.cpp
+  src/png.cpp
   src/session.cpp
+  src/session_analysis.cpp
   src/snapshot.cpp)
 target_include_directories(z80core PUBLIC include)
 target_compile_features(z80core PUBLIC cxx_std_20)

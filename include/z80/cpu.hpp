@@ -191,6 +191,17 @@ public:
 
     void setTrace(Trace trace) { trace_ = std::move(trace); }
 
+    /// Called instead of executing an instruction whenever PC lies in [first, last]. If the hook
+    /// returns true it has handled the instruction (it must change PC, e.g. emulate a RET); the step
+    /// then counts as 10 T-states. Used to stub out ROM routines that are not available.
+    using ExecHook = std::function<bool(Cpu&)>;
+    void setExecHook(Word first, Word last, ExecHook hook) {
+        hookFirst_ = first;
+        hookLast_ = last;
+        hook_ = std::move(hook);
+    }
+    void clearExecHook() { hook_ = nullptr; }
+
     void setPortHandlers(PortIn in, PortOut out) {
         portIn_ = std::move(in);
         portOut_ = std::move(out);
@@ -251,6 +262,9 @@ private:
     std::set<Word> breakpoints_;
     std::map<Word, WatchKind> watch_;
     Trace trace_;
+    ExecHook hook_;
+    Word hookFirst_ = 0;
+    Word hookLast_ = 0;
     PortIn portIn_;
     PortOut portOut_;
 

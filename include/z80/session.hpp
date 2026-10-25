@@ -3,11 +3,15 @@
 #include <deque>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <string_view>
 
+#include "z80/annotations.hpp"
 #include "z80/assembler.hpp"
+#include "z80/cpc.hpp"
 #include "z80/cpu.hpp"
+#include "z80/disassembler.hpp"
 #include "z80/json.hpp"
 #include "z80/memory.hpp"
 #include "z80/snapshot.hpp"
@@ -48,9 +52,33 @@ private:
     Memory& memory_;
     Cpu cpu_;
     std::map<std::string, Symbol> symbols_;
-    std::map<std::string, Snapshot> checkpoints_;
+    struct Checkpoint {
+        Snapshot machine;      ///< CPU state and RAM
+        cpc::VideoState video;  ///< screen mode, palette, CRTC (restored on rollback)
+    };
+    std::map<std::string, Checkpoint> checkpoints_;
     std::deque<std::pair<Word, Byte>> ioLog_;
     std::deque<Byte> input_;
+
+    // ---- reverse-engineering state (see session_analysis.cpp) ----
+    struct FirmwareCall {
+        std::string name;
+        Word address = 0;
+        Byte a = 0;
+        Word bc = 0, de = 0, hl = 0;
+    };
+    std::unique_ptr<Disassembler> dis_;   ///< code analysis (created by "analyze")
+    std::set<Word> analysisEntries_;      ///< entry points given to "analyze"
+    Annotations ann_;                     ///< names and comments given by the user / LLM
+    bool cpc_ = false;                    ///< Amstrad CPC mode: video hardware, firmware stubs
+    cpc::VideoState video_;
+    std::map<std::string, IndexedImage> screens_;
+    std::deque<FirmwareCall> firmwareLog_;
+    std::string console_;                 ///< characters passed to TXT_OUTPUT while stubbed
+    void enableCpc();
+    void applyRomState();
+    void installFirmwareStubs();
+    bool firmwareStub(Cpu& cpu);
     friend struct Impl;
 };
 

@@ -456,7 +456,7 @@ struct Monitor::Impl {
         requireFiles();
         const auto data = readFile(word(0, "file name"));
         if (looksLikeSna(data) && args.size() < 2) {
-            m.memory_ = loadSna(data);
+            m.memory_.load(0, loadSna(data).bytes());
             out << "snapshot loaded (64 KiB RAM)\n";
         } else {
             const Word a = addrArg(1, Word{0});

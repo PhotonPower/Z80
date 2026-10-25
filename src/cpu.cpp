@@ -918,6 +918,8 @@ unsigned Cpu::step() {
         Registers& r = state_.regs;
         r.r = B8((r.r & 0x80) | ((r.r + 1) & 0x7F));
         cycles = 4;
+    } else if (hook_ && state_.regs.pc >= hookFirst_ && state_.regs.pc <= hookLast_ && hook_(*this)) {
+        cycles = 10;
     } else {
         cycles = executeInstruction();
     }

@@ -97,6 +97,16 @@ private:
         const unsigned hi = next();
         return hex16(lo | (hi << 8));
     }
+    /// A 16-bit operand that is data rather than a branch target; may be shown by name.
+    std::string imm16Operand(bool memory) {
+        const unsigned lo = next();
+        const unsigned hi = next();
+        const auto value = static_cast<Word>(lo | (hi << 8));
+        if (options_.operandSymbolizer) {
+            if (auto name = options_.operandSymbolizer(value, memory)) return *name;
+        }
+        return hex16(value);
+    }
 
     std::string targetName(Word target) const {
         if (options_.symbolizer) {
@@ -185,7 +195,7 @@ private:
                         break;
                     case 1:
                         if (q == 0) {
-                            set("LD", reg16(p) + "," + imm16());
+                            set("LD", reg16(p) + "," + imm16Operand(false));
                         } else {
                             set("ADD", hlName() + "," + reg16(p));
                         }
@@ -199,7 +209,7 @@ private:
                                 set("LD", std::string("A,") + kIndirect[p]);
                             }
                         } else {
-                            const std::string nn = "(" + imm16() + ")";
+                            const std::string nn = "(" + imm16Operand(true) + ")";
                             const std::string reg = (p == 2) ? hlName() : "A";
                             set("LD", q == 0 ? nn + "," + reg : reg + "," + nn);
                         }
@@ -389,7 +399,7 @@ private:
                 break;
             case 3: {
                 if (p == 2) return invalid(2);  // ED 63 / ED 6B: alias of the short forms
-                const std::string nn = "(" + imm16() + ")";
+                const std::string nn = "(" + imm16Operand(true) + ")";
                 set("LD", q == 0 ? nn + "," + kReg16[p] : std::string(kReg16[p]) + "," + nn);
                 break;
             }
