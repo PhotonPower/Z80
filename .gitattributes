@@ -1,0 +1,10 @@
+# Normalise line endings for text files...
+* text=auto
+
+# ...but keep the original BASIC sources byte-for-byte (CRLF, ISO-8859-1 umlauts).
+legacy/** -text
+*.bas -text
+
+# Binary snapshot / image files
+*.sna binary
+*.bin binary
