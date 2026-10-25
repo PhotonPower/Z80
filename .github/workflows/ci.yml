@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            werror: "ON"
+          - os: macos-latest
+            werror: "OFF"
+          - os: windows-latest
+            werror: "OFF"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DZ80_WARNINGS_AS_ERRORS=${{ matrix.werror }}
+      - name: Build
+        run: cmake --build build --config Release
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+  sanitizers:
+    name: AddressSanitizer + UBSan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DZ80_SANITIZE=ON
+      - name: Build
+        run: cmake --build build
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  crosscheck:
+    name: Cross-check against z80asm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install z80asm
+        run: sudo apt-get update && sudo apt-get install -y z80asm
+      - name: Build tools
+        run: cmake -S . -B build -DZ80_BUILD_TOOLS=ON -DZ80_BUILD_TESTS=OFF && cmake --build build
+      - name: Compare decoder and assembler output
+        run: python3 tools/crosscheck_z80asm.py build/z80_dump_forms
