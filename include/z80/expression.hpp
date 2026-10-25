@@ -26,14 +26,18 @@ class ExpressionEvaluator {
 public:
     using Lookup = std::function<std::optional<std::int64_t>(const std::string& upperName)>;
 
-    explicit ExpressionEvaluator(Lookup lookup = {}, std::int64_t pc = 0)
-        : lookup_(std::move(lookup)), pc_(pc) {}
+    /// `hexDefault`: numbers without prefix or suffix are hexadecimal (monitor convention), and a
+    /// name that is not known to `lookup` but consists only of hex digits (e.g. "BEEF") is a number.
+    /// Known symbols always win over such an interpretation.
+    explicit ExpressionEvaluator(Lookup lookup = {}, std::int64_t pc = 0, bool hexDefault = false)
+        : lookup_(std::move(lookup)), pc_(pc), hexDefault_(hexDefault) {}
 
     [[nodiscard]] ExprResult evaluate(std::string_view text) const;
 
 private:
     Lookup lookup_;
     std::int64_t pc_;
+    bool hexDefault_;
 };
 
 /// Convenience: evaluates a constant expression without symbols.

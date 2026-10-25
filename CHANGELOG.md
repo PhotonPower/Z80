@@ -7,6 +7,10 @@ die Versionierung an [Semantic Versioning](https://semver.org/lang/de/).
 ## [Unreleased]
 
 ### Hinzugefügt
+- **Monitor** (`z80tool monitor`, Klasse `z80::Monitor`): Disassemblieren, Speicherbefehle, zeilenweises
+  Assemblieren, Register, Einzelschritt/Step over/bis Rückkehr/Lauf, Haltepunkte, Watchpoints,
+  Checkpoints, Symbole, Dateibefehle; Zahlen standardmäßig hexadezimal.
+- `ExpressionEvaluator`: optionaler Hex-Standard; `AssemblerOptions::predefined` (vordefinierte Symbole).
 - **Z80-Emulator** (`z80::Cpu`): alle dokumentierten und die verbreiteten undokumentierten Befehle,
   Flags 3/5 und `MEMPTR`, T-States pro Befehl, Interrupts (IM 0/1/2, NMI), Port-Handler.
   Besteht ZEXDOC und ZEXALL (67/67).
@@ -36,6 +40,9 @@ in ein gemeinsames Projekt.
 - Tests (7 Suiten, u. a. exhaustiver Dekoder↔Assembler-Roundtrip und Property-Test
   `assemble(disassemble(x)) == x`), CI (Linux, macOS, Windows, Sanitizer, Kreuzprüfung gegen
   `z80asm`), Dokumentation in `docs/`.
+
+### Geändert
+- Agenten-Protokoll `set`: Setzen von `PC` beendet einen laufenden `HALT`.
 
 ### Behoben (gegenüber den BASIC-Originalen)
 Siehe [docs/migration-from-basic.md](docs/migration-from-basic.md).

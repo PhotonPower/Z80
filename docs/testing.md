@@ -19,6 +19,8 @@ Die Tests brauchen kein externes Framework; `tests/test_util.hpp` stellt `CHECK`
 | `cpu`              | Emulator: Flags, BCD, Zeitverhalten (inkl. indizierter Befehle, `LDIR`, `DJNZ`), Block-/Index-/undokumentierte Befehle, Aufruf/Rückkehr, `runUntilReturn` (auch verschachtelt), `stepOver`, Breakpoints, Limits, Watchpoints, Interrupts IM 1/2, EI-Verzögerung, NMI/`RETN`, `HALT`, Ports, Registernamen, Snapshots (Roundtrip, beschädigte Dateien), JSON-Zustand, **40 × Zufallscode: Wiederholung aus Snapshot ist identisch** |
 | `session`          | JSON-Parser/-Ausgabe (inkl. Fehlerfälle, Verschachtelungsgrenze), Agenten-Protokoll: Assemblieren/Laufen/Lesen, Breakpoints, `call`, Checkpoints, `diff`, E/A, Interrupts, Fehlerbehandlung, gesperrter Dateizugriff, Snapshot-Dateien |
 
+| `monitor`          | Hex-Standard der Ausdrücke, vordefinierte Symbole im Assembler, alle Monitorbefehle (Speicher, Assemble-Modus, Lauf/Step/Haltepunkte/Watchpoints, Register, Checkpoints, Interrupts, E/A, Symbole, Dateien inkl. gesperrtem Dateizugriff), Robustheit gegen fehlerhafte Eingaben |
+
 Der Roundtrip-Test beweist die Konsistenz von Dekoder und Assembler **untereinander**. Gegen
 gemeinsame Denkfehler schützt die Kreuzprüfung mit unabhängigen Werkzeugen.
 

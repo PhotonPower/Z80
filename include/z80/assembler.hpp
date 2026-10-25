@@ -42,6 +42,9 @@ struct ListingLine {
 
 struct AssemblerOptions {
     Word origin = 0x0000;  ///< initial program counter (before the first ORG)
+    /// Symbols that exist before the first line (e.g. labels of an already loaded program).
+    /// Source lines may use them; defining a label of the same name overrides it.
+    std::map<std::string, std::int64_t> predefined;
 };
 
 struct AssemblyResult {

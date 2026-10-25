@@ -170,6 +170,16 @@ int main() {
         CHECK_EQ(str(*ask(s, R"({"cmd":"regs"})").find("regs"), "PC"), std::string("0x0038"));
     }
 
+    // ---- repositioning PC leaves HALT ----
+    {
+        Session s;
+        ask(s, R"({"cmd":"asm","source":"ORG &100\nHALT\nLD A,9\nHALT\n","entry":256})");
+        CHECK_EQ(str(ask(s, R"({"cmd":"run"})"), "stop"), std::string("halted"));
+        ask(s, R"({"cmd":"set","regs":{"PC":257}})");
+        const Json r = ask(s, R"({"cmd":"run"})");
+        CHECK_EQ(str(*r.find("regs"), "A"), std::string("0x09"));
+    }
+
     // ---- error handling ----
     {
         Session s;

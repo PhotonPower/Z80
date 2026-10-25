@@ -37,6 +37,13 @@ für einen lokalen LLM-Agenten gedacht; geplant ist außerdem der Ausbau zu eine
   (assemblieren, ausführen, Register/Speicher lesen und setzen, `call`, `diff`, Checkpoints …),
   Dateizugriff nur mit `--allow-files` ([docs/agent-protocol.md](docs/agent-protocol.md))
 
+**Monitor** ([docs/monitor.md](docs/monitor.md)) – `z80tool monitor`
+- klassische Eingabeschleife mit Hex-Standard: disassemblieren (`d`), Speicher ansehen/ändern/
+  füllen/kopieren/suchen (`m e f t h c`), **Zeilen assemblieren** (`a`), Register (`r`)
+- ausführen im Emulator: Einzelschritt (`n`), Step over (`o`), bis Rückkehr (`u`), `g`, Haltepunkte
+  (`b`), Watchpoints (`w`), Checkpoints (`ck`/`rb`), Symbole (`sym`), Dateien (`asm`, `l`, `sv`)
+- als Klasse `z80::Monitor` ohne eigene Ein-/Ausgabe, deshalb testbar und einbettbar
+
 Alles ist getestet: u. a. ein exhaustiver Roundtrip über alle Opcode-Präfixe, ein Property-Test
 (`assemble(disassemble(x)) == x` für Zufallsdaten) und eine Kreuzprüfung gegen den unabhängigen
 Assembler `z80asm` ([docs/testing.md](docs/testing.md)).
@@ -50,6 +57,7 @@ ctest --test-dir build                  # Tests
 
 ./build/z80tool asm examples/hello_cpc.asm -l -         # assemblieren, Listing auf den Bildschirm
 ./build/z80tool dis hello_cpc.bin --org 0x4000          # disassemblieren
+./build/z80tool monitor                                 # interaktiver Monitor (? für Hilfe)
 ./build/z80tool serve < examples/agent_session.jsonl    # Emulator per JSON-Protokoll
 ```
 
@@ -90,6 +98,7 @@ $ z80tool dis hello.bin --org 0x4000 --asm -o re.asm && z80tool asm re.asm -o re
 | [docs/usage.md](docs/usage.md)                          | Kommandozeile, alle Optionen, Rezepte               |
 | [docs/assembler-syntax.md](docs/assembler-syntax.md)    | Quelltextformat, Ausdrücke, Pseudobefehle           |
 | [docs/formats.md](docs/formats.md)                      | Kommentardatei, `.sna`, Intel HEX, Ausgabeformate   |
+| [docs/monitor.md](docs/monitor.md)                      | Monitor: Befehle, Zahlenschreibweise, Beispiel     |
 | [docs/emulator.md](docs/emulator.md)                    | Z80-Emulator: API, Genauigkeit, Zustand speichern  |
 | [docs/agent-protocol.md](docs/agent-protocol.md)        | JSON-Protokoll für LLM-Agenten (`z80tool serve`)   |
 | [docs/architecture.md](docs/architecture.md)            | Aufbau des Codes, Algorithmen, Erweiterungspunkte   |
@@ -117,8 +126,8 @@ docs/          Dokumentation
 - Keine Makros, bedingte Assemblierung oder `INCLUDE`.
 - Der Emulator rechnet pro Befehl, nicht pro Bus-Zyklus (keine Wait-States/Contention); nur ein
   Speicher-Layout (flache 64 KiB, keine Bank-Umschaltung).
-- Der interaktive Monitor (Eingabeschleife für Menschen) ist noch nicht implementiert; der Emulator
-  und das JSON-Protokoll sind dafür die Grundlage.
+- Der Monitor hat keine eigene Zeilenbearbeitung (Tipp: `rlwrap z80tool monitor`) und assembliert
+  zeilenweise ohne Vorwärtsreferenzen.
 
 ## Lizenz
 

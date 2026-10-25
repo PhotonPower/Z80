@@ -420,6 +420,11 @@ AssemblyResult Assembler::assemble(std::string_view source) const {
 
     // Resolve labels (and forward-referenced EQUs) by iterating until the symbol table is stable.
     std::map<std::string, Symbol> symbols;
+    for (const auto& [name, value] : options_.predefined) {
+        std::string upperName = name;
+        for (char& c : upperName) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        symbols[upperName] = Symbol{value, 0, true};
+    }
     constexpr int kMaxPasses = 16;
     for (int pass = 0; pass < kMaxPasses; ++pass) {
         Run run(options_, lines, symbols, false);

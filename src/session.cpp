@@ -244,6 +244,9 @@ struct Session::Impl {
             if (n < 0 || !setRegister(s.cpu_.regs(), name, static_cast<std::uint32_t>(n))) {
                 throw SessionError("cannot set register '" + name + "' to that value");
             }
+            if (name.size() == 2 && (name[0] == 'P' || name[0] == 'p') && (name[1] == 'C' || name[1] == 'c')) {
+                s.cpu_.regs().halted = false;  // repositioning leaves HALT
+            }
         }
         Json j = Json::object();
         j.set("regs", regs_());

@@ -48,6 +48,7 @@ add_library(z80core STATIC
   src/format.cpp
   src/image_io.cpp
   src/json.cpp
+  src/monitor.cpp
   src/session.cpp
   src/snapshot.cpp)
 target_include_directories(z80core PUBLIC include)

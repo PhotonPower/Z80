@@ -110,7 +110,16 @@ Alle Läufe gehen durch eine Schleife (`Cpu::execute`); `run`, `runUntil`, `runU
 `stepOver` und `stepInstruction` unterscheiden sich nur in der `RunSpec`. `Session` enthält keine
 Ein-/Ausgabe und ist deshalb ohne Prozess testbar; `app/main.cpp` verbindet sie mit stdin/stdout.
 
-## Erweiterungspunkte (für den Monitor)
+## Monitor
+
+`z80::Monitor` (`monitor.hpp`) kombiniert `Cpu`, `decode()`, `Assembler` und die Snapshot-Funktionen
+hinter einer Zeilenschnittstelle: `execute(zeile) → Text`. Die Klasse hat weder Konsole noch
+Dateinamen-Logik außer den Dateibefehlen (abschaltbar); `app/main.cpp` liest Zeilen, gibt Prompt und
+Ausgabe aus. Der Assemble-Modus ruft für jede Zeile den vollständigen `Assembler` mit
+`AssemblerOptions::predefined` (= Symbole des Monitors) auf – so gelten dieselben Regeln wie beim
+Assemblieren von Dateien. Zahlen werden mit `ExpressionEvaluator(..., hexDefault=true)` ausgewertet.
+
+## Erweiterungspunkte
 
 - `decode()` ist zustandslos und kann für „disassembliere ab hier, n Befehle“ direkt verwendet
   werden.

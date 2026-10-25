@@ -40,11 +40,19 @@ std::int64_t parseDigits(std::string_view digits, int base, std::string_view who
     return value;
 }
 
+bool allHexDigits(std::string_view s) {
+    if (s.empty()) return false;
+    for (char c : s) {
+        if (!isHex(c)) return false;
+    }
+    return true;
+}
+
 class Parser {
 public:
     Parser(std::string_view text, const ExpressionEvaluator::Lookup& lookup, std::int64_t pc,
-           ExprResult& result)
-        : s_(text), lookup_(lookup), pc_(pc), result_(result) {}
+           ExprResult& result, bool hexDefault)
+        : s_(text), lookup_(lookup), pc_(pc), result_(result), hexDefault_(hexDefault) {}
 
     std::int64_t parseAll() {
         const std::int64_t v = parseOr();
@@ -234,6 +242,7 @@ private:
             return true;
         };
 
+        if (hexDefault_ && allHexDigits(u)) return parseDigits(u, 16, token);
         if (u.size() > 2 && u[0] == '0' && u[1] == 'X') return parseDigits(u.substr(2), 16, token);
         if (u.back() == 'H') return parseDigits(std::string_view(u).substr(0, u.size() - 1), 16, token);
         if (u.size() > 2 && u[0] == '0' && u[1] == 'B' && allBinary(std::string_view(u).substr(2))) {
@@ -262,6 +271,7 @@ private:
         if (lookup_) {
             if (auto v = lookup_(name)) return *v;
         }
+        if (hexDefault_ && allHexDigits(name)) return parseDigits(name, 16, name);
         result_.undefinedNames.push_back(name);
         return 0;
     }
@@ -270,6 +280,7 @@ private:
     const ExpressionEvaluator::Lookup& lookup_;
     std::int64_t pc_;
     ExprResult& result_;
+    bool hexDefault_;
     std::size_t i_ = 0;
 };
 
@@ -278,7 +289,7 @@ private:
 ExprResult ExpressionEvaluator::evaluate(std::string_view text) const {
     ExprResult result;
     try {
-        Parser parser(text, lookup_, pc_, result);
+        Parser parser(text, lookup_, pc_, result, hexDefault_);
         result.value = parser.parseAll();
     } catch (const ExprError& e) {
         result.ok = false;

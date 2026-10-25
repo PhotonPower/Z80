@@ -10,10 +10,19 @@
 #include <string>
 #include <vector>
 
+#ifdef _WIN32
+#include <io.h>
+#define Z80_ISATTY(fd) _isatty(fd)
+#else
+#include <unistd.h>
+#define Z80_ISATTY(fd) isatty(fd)
+#endif
+
 #include "z80/assembler.hpp"
 #include "z80/disassembler.hpp"
 #include "z80/expression.hpp"
 #include "z80/image_io.hpp"
+#include "z80/monitor.hpp"
 #include "z80/session.hpp"
 #include "z80/version.hpp"
 
@@ -35,6 +44,7 @@ void printUsage(std::ostream& out) {
         << "Usage:\n"
         << "  z80tool asm <source.asm> [options]\n"
         << "  z80tool dis <image>      [options]\n"
+        << "  z80tool monitor [image] [--org <hex>] [--no-files]   interactive machine-code monitor\n"
         << "  z80tool serve [--allow-files]   emulator server: JSON requests on stdin, replies on stdout\n"
         << "  z80tool help | version\n"
         << "\n"
@@ -253,6 +263,44 @@ int runServe(Args args) {
     return kExitOk;
 }
 
+// ---- monitor ---------------------------------------------------------------------------
+
+int runMonitor(Args args) {
+    z80::MonitorOptions options;
+    std::string image;
+    z80::Word org = 0;
+    while (!args.done()) {
+        const std::string a = args.next();
+        if (a == "--no-files") options.allowFiles = false;
+        else if (a == "--org") {  // monitor convention: plain digits are hexadecimal
+            const std::string text = args.value(a);
+            const auto r = z80::ExpressionEvaluator({}, 0, true).evaluate(text);
+            if (!r.ok || !r.undefinedNames.empty() || r.value < 0 || r.value > 0xFFFF) throw UsageError("invalid load address: '" + text + "'");
+            org = static_cast<z80::Word>(r.value);
+        }
+        else if (!a.empty() && a[0] == '-') throw UsageError("unknown option " + a);
+        else if (image.empty()) image = a;
+        else throw UsageError("more than one image given");
+    }
+    z80::Monitor monitor(options);
+    if (!image.empty()) {
+        const auto data = z80::readFile(image);
+        if (z80::looksLikeSna(data)) monitor.memory() = z80::loadSna(data);
+        else monitor.memory().load(org, data);
+    }
+
+    const bool interactive = Z80_ISATTY(0) != 0;  // no banner/prompts when a script is piped in
+    if (interactive) std::cout << z80::Monitor::banner();
+    std::string line;
+    for (;;) {
+        if (interactive) std::cout << monitor.prompt() << std::flush;
+        if (!std::getline(std::cin, line)) break;
+        std::cout << monitor.execute(line) << std::flush;
+        if (monitor.finished()) break;
+    }
+    return kExitOk;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -265,6 +313,7 @@ int main(int argc, char** argv) {
         if (command == "asm") return runAsm(Args(argc, argv, 2));
         if (command == "dis") return runDis(Args(argc, argv, 2));
         if (command == "serve") return runServe(Args(argc, argv, 2));
+        if (command == "monitor") return runMonitor(Args(argc, argv, 2));
         if (command == "version" || command == "--version") {
             std::cout << "z80tool " << z80::kVersion << "\n";
             return kExitOk;
