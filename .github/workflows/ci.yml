@@ -64,7 +64,10 @@ jobs:
       - name: Fetch the CPC 6128 ROM (shipped with Caprice32 by permission of Amstrad; not stored in this repository)
         run: curl -sSL -o cpc6128.rom https://raw.githubusercontent.com/ColinPitrat/caprice32/master/rom/cpc6128.rom
       - name: Boot the firmware and draw text
-        run: CPC_ROM=$PWD/cpc6128.rom Z80TOOL=$PWD/build/z80tool python3 -m unittest -v tests/agent/test_firmware.py
+        run: |
+          export CPC_ROM=$PWD/cpc6128.rom Z80TOOL=$PWD/build/z80tool
+          python3 tests/agent/test_firmware.py -v > firmware.log 2>&1 || { cat firmware.log; python3 tools/ci_annotate.py "firmware test failed" firmware.log; }
+          cat firmware.log
 
   zex:
     name: ZEXDOC / ZEXALL (Z80 instruction exerciser)

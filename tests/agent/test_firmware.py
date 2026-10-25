@@ -4,7 +4,10 @@ The ROM is not part of this repository. CI downloads it for this test; locally s
     CPC_ROM=cpc6128.rom Z80TOOL=build/z80tool python3 -m unittest tests/agent/test_firmware.py
 """
 import os
+import sys
 import unittest
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # works from any working directory
 
 import test_orchestrator as base  # noqa: F401  (puts mock_ollama and the orchestrator module on the path)
 
