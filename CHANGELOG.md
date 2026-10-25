@@ -24,7 +24,6 @@ in ein gemeinsames Projekt.
 - Tests (7 Suiten, u. a. exhaustiver Dekoder↔Assembler-Roundtrip und Property-Test
   `assemble(disassemble(x)) == x`), CI (Linux, macOS, Windows, Sanitizer, Kreuzprüfung gegen
   `z80asm`), Dokumentation in `docs/`.
-- Originale BASIC-Quellen unverändert unter `legacy/basic/`.
 
 ### Behoben (gegenüber den BASIC-Originalen)
 Siehe [docs/migration-from-basic.md](docs/migration-from-basic.md).

@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Z80-Assembler und -Disassembler in modernem C++20 – hervorgegangen aus zwei BASIC-Programmen
-(siehe [`legacy/basic/`](legacy/basic)). Geplant ist der Ausbau zu einem vollständigen
+(`Z80_Assembler.bas`, `z80_dissass.bas`). Geplant ist der Ausbau zu einem vollständigen
 **Maschinensprache-Monitor** ([Roadmap](docs/roadmap.md)).
 
 ## Funktionen
@@ -93,7 +93,6 @@ tests/         Unit- und Property-Tests (CTest)
 tools/         Entwicklerwerkzeuge (Kreuzprüfung gegen z80asm)
 examples/      Beispielprogramm und Kommentardatei
 docs/          Dokumentation
-legacy/basic/  die ursprünglichen BASIC-Programme (unverändert)
 ```
 
 ## Grenzen (Version 0.1)

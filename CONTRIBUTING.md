@@ -30,4 +30,3 @@ Weitere CMake-Optionen:
   globalen Zustände; Benutzerinteraktion gehört nach `app/`.
 - Quelltext, Bezeichner und Kommentare sind Englisch, die Dokumentation unter `docs/` Deutsch.
 - Formatierung: siehe `.clang-format` / `.editorconfig`.
-- `legacy/` wird nicht verändert.

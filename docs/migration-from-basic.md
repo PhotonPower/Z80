@@ -1,6 +1,6 @@
 # Von BASIC nach C++
 
-Die ursprünglichen Programme liegen unverändert in [`legacy/basic/`](../legacy/basic):
+Die ursprünglichen Programme sind nicht Teil des Repositorys:
 
 - `Z80_Assembler.bas` – Assembler (FreeBASIC)
 - `z80_dissass.bas` – Disassembler (FreeBASIC, „für Caprice Snapshot files .sna“)
