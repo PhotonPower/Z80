@@ -6,6 +6,11 @@ die Versionierung an [Semantic Versioning](https://semver.org/lang/de/).
 
 ## [Unreleased]
 
+### Hinzugefügt
+- Listing: Erklärung von Idiomen (`LD SP,nn`, Interrupt-Vektor-Installation, `HALT`, `IM`), Zähler `user_comments`.
+- Orchestrator: einmalige Vollständigkeitsprüfung vor `finish_routine`; `run_routine` fasst Änderungen im
+  Bildschirmspeicher zusammen und erklärt, dass ein nicht zurückkehrender Einstiegspunkt normal ist.
+
 ### Behoben
 - Orchestrator: ausufernder „Thinking“-Modus füllte das Kontextfenster (kein Tool-Aufruf mehr). Jetzt
   `think=false` als Standard (mit Rückfall für Modelle ohne Thinking), Abtastung nach Qwen-Empfehlung,

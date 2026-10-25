@@ -28,6 +28,7 @@ struct ListingResult {
     std::size_t namedLabels = 0;     ///< labels given by the user/LLM
     std::size_t autoLabels = 0;      ///< sub_xxxx / loc_xxxx still to be named
     std::size_t commentedLines = 0;
+    std::size_t userComments = 0;    ///< line and block comments that come from the annotations (not automatic ones)
 };
 
 /// Builds the annotated, re-assemblable listing of [from, to].

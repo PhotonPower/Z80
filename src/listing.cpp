@@ -143,9 +143,14 @@ private:
     std::optional<Word> port_;        // port number currently held in BC (from LD BC,nn / LD B,n)
     bool portLowKnown_ = false;       // low byte (= value of C) is known
     std::optional<Byte> knownA_;      // A after an immediate load
+    std::optional<Word> knownHl_;     // HL after an immediate load
+    bool jpAtVector_ = false;         // a JP opcode (&C3) was just stored at &0038
+    std::size_t userComments_ = 0;
     void resetContext() {
         port_.reset();
         knownA_.reset();
+        knownHl_.reset();
+        jpAtVector_ = false;
     }
     std::size_t instructions_ = 0;
     std::size_t commented_ = 0;
@@ -200,6 +205,7 @@ std::vector<std::string> Builder::headerFor(Word a) {
         out.push_back("");
         for (const auto& l : wrapText(*block, 76)) out.push_back("; " + l);
         ++commented_;
+        ++userComments_;
     }
     const RoutineDoc* doc = ann_.routineAt(a);
     const bool isCall = dis_.callers().count(a) != 0;
@@ -255,6 +261,24 @@ bool involvesA(const Instruction& i) {
     for (char c : i.operands + ",") {
         if (c == ',' || c == '(' || c == ')' || c == '+' || c == '-') {
             if (token == "A" || token == "AF") return true;
+            token.clear();
+        } else {
+            token += c;
+        }
+    }
+    return false;
+}
+
+/// True if the instruction reads or writes the register pair `pair` ("HL", "DE", ...) explicitly or implicitly.
+bool involvesPair(const Instruction& i, const std::string& pair) {
+    static const std::set<std::string> blockOps = {"LDI", "LDD", "LDIR", "LDDR", "CPI", "CPD", "CPIR", "CPDR", "INI", "IND", "INIR", "INDR",
+                                                   "OUTI", "OUTD", "OTIR", "OTDR", "EXX", "POP", "RLD", "RRD"};
+    if (pair == "HL" && blockOps.count(i.mnemonic) && i.mnemonic != "POP") return true;
+    if (pair == "DE" && (i.mnemonic == "LDI" || i.mnemonic == "LDD" || i.mnemonic == "LDIR" || i.mnemonic == "LDDR" || i.mnemonic == "EXX")) return true;
+    std::string token;
+    for (char c : i.operands + ",") {
+        if (c == ',' || c == '(' || c == ')' || c == '+' || c == '-') {
+            if (token == pair || (pair == "HL" && (token == "H" || token == "L"))) return true;
             token.clear();
         } else {
             token += c;
@@ -339,12 +363,44 @@ void Builder::codeLine(Word a, Line& line) {
         }
     }
 
+    // well-known idioms: say what they mean, because they are easy to misread
+    if (options_.hardwareComments && autoComment.empty()) {
+        const Word nn = ins.length == 3 ? static_cast<Word>(ins.bytes[1] | (ins.bytes[2] << 8)) : Word{0};
+        if (ins.length == 3 && ins.bytes[0] == 0x31) {
+            autoComment = "stack pointer: the stack starts at &" + h4(nn) + " and grows DOWNWARDS (it uses the RAM below &" + h4(nn) + ")";
+        } else if (ins.mnemonic == "HALT") {
+            autoComment = "waits for the next interrupt (a CPC raises one every 3.3 ms)";
+        } else if (ins.mnemonic == "IM" && ins.operands == "1") {
+            autoComment = "interrupt mode 1: every interrupt jumps to &0038";
+        } else if (ins.mnemonic == "IM" && ins.operands == "2") {
+            autoComment = "interrupt mode 2: vector table at I*256 + data byte";
+        } else if (ins.length == 3 && ins.bytes[0] == 0x32 && nn < 0x0040) {  // LD (nn),A into the RST area
+            if (nn == 0x0038 && knownA_ && *knownA_ == 0xC3) {
+                autoComment = "stores the JP opcode (&C3) at &0038, the interrupt entry (IM 1): installs an interrupt handler";
+                jpAtVector_ = true;
+            } else {
+                autoComment = "writes into the RST / interrupt vector area &0000-&003F";
+            }
+        } else if (ins.length == 3 && ins.bytes[0] == 0x22 && nn == 0x0039 && jpAtVector_ && knownHl_) {
+            autoComment = "target of that JP: the interrupt handler is at &" + h4(*knownHl_);
+        } else if (ins.length == 3 && ins.bytes[0] == 0x22 && nn < 0x0040) {
+            autoComment = "writes into the RST / interrupt vector area &0000-&003F";
+        }
+    }
+
     // keep the tracked context up to date for the next instruction
     if (ins.mnemonic == "LD" && ins.length == 2 && ins.operands.rfind("A,", 0) == 0 && ins.operands.find('(') == std::string::npos) {
         knownA_ = ins.bytes[1];
     } else if (involvesA(ins) && !isPortOut(ins)) {
         knownA_.reset();
     }
+    if (ins.mnemonic == "LD" && ins.length == 3 && ins.bytes[0] == 0x21) {
+        knownHl_ = static_cast<Word>(ins.bytes[1] | (ins.bytes[2] << 8));
+    } else if (involvesPair(ins, "HL") && !(ins.length == 3 && ins.bytes[0] == 0x22)) {
+        knownHl_.reset();
+    }
+    if (!(ins.length == 3 && ins.bytes[0] == 0x22) && !(ins.length == 3 && ins.bytes[0] == 0x32) && !(ins.mnemonic == "LD" && ins.length == 3 && ins.bytes[0] == 0x21))
+        jpAtVector_ = jpAtVector_ && (ins.mnemonic == "LD");  // only loads may sit between the two stores
     if (ins.flow != FlowKind::Sequential || !ins.valid) resetContext();
     if (changesBc(ins) && !(ins.mnemonic == "LD" && (operands.rfind("BC,", 0) == 0 || operands.rfind("B,", 0) == 0) && port_)) {
         port_.reset();
@@ -362,6 +418,7 @@ void Builder::codeLine(Word a, Line& line) {
     if (const std::string* c = ann_.commentAt(a)) {
         line.comment = *c;
         ++commented_;
+        ++userComments_;
     } else if (!autoComment.empty()) {
         line.comment = autoComment;
         ++commented_;
@@ -565,6 +622,7 @@ ListingResult Builder::build() {
         if (inRange(addr)) ++result_.namedLabels;
     }
     result_.commentedLines = commented_;
+    result_.userComments = userComments_;
     return result_;
 }
 

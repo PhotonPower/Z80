@@ -268,6 +268,50 @@ int main() {
         EXPECT_IN(r.text, "'H'+&80");
     }
 
+    // ---- idioms that are easy to misread ----
+    {
+        Memory memory;
+        const auto r = Assembler().assemble(
+            "        ORG &0600\n"
+            "        DI\n"
+            "        LD SP,&C000\n"
+            "        IM 1\n"
+            "        LD A,&C3\n"
+            "        LD (&0038),A\n"
+            "        LD HL,&1D93\n"
+            "        LD (&0039),HL\n"
+            "        LD A,&05\n"
+            "        LD (&0010),A\n"
+            "        LD (&1C97),A\n"
+            "        EI\n"
+            "        HALT\n"
+            "        RET\n");
+        r.applyTo(memory);
+        Disassembler dis(memory);
+        dis.analyzeFlow(0x0600);
+        const ListingResult l = renderListing(memory, dis, Annotations{});
+        CHECK(l.verified);
+        EXPECT_IN(l.text, "stack starts at &C000 and grows DOWNWARDS");
+        EXPECT_IN(l.text, "interrupt mode 1: every interrupt jumps to &0038");
+        EXPECT_IN(l.text, "stores the JP opcode (&C3) at &0038");
+        EXPECT_IN(l.text, "the interrupt handler is at &1D93");
+        EXPECT_IN(l.text, "writes into the RST / interrupt vector area");   // &0010 with A=5: not the JP idiom
+        EXPECT_IN(l.text, "waits for the next interrupt");
+        // user comments replace automatic ones and are counted separately
+        Annotations ann;
+        ann.setComment(0x0600, "my note");
+        ann.setBlockComment(0x0601, "a section");
+        const ListingResult m = renderListing(memory, dis, ann);
+        CHECK_EQ(m.userComments, std::size_t{2});
+        CHECK(m.commentedLines > m.userComments);  // plus the automatic comments
+        // an unrelated HL load in between breaks the pairing
+        Memory memory2;
+        Assembler().assemble("        ORG &0700\n        LD A,&C3\n        LD (&0038),A\n        LD HL,&1111\n        INC HL\n        LD (&0039),HL\n        RET\n").applyTo(memory2);
+        Disassembler dis2(memory2);
+        dis2.analyzeFlow(0x0700);
+        EXPECT_NOT_IN(renderListing(memory2, dis2, Annotations{}).text, "the interrupt handler is at");
+    }
+
     // ---- nothing analysed ----
     {
         Memory memory;

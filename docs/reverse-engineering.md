@@ -77,6 +77,10 @@ python3 agent/z80_annotate.py --sna spiel.sna --project spiel.z80proj.json --out
 
 Rückgabewert: `0`, wenn das Listing verifiziert ist; `1`, wenn nicht; `2` bei Verbindungsproblemen.
 
+**Vollständigkeitsprüfung:** Beim ersten `finish_routine` prüft der Orchestrator die Routine: noch unbenannte Labels
+(`loc_…`), ungenannte Speicherstellen (`LD (&1C97),A`) und zu wenige Kommentare (etwa einer je 10 Befehle) werden dem Modell
+aufgelistet. Ein zweiter Aufruf gilt immer als endgültig, das Modell kann also nie festhängen.
+
 Ablauf: Analyse ab den Einsprungpunkten → Routinen **von den Blättern zur Wurzel** (zuerst, was nichts
 Undokumentiertes aufruft), je Routine eine eigene Unterhaltung mit dem Listing, den Namen der bereits
 dokumentierten Aufgerufenen und den Werkzeugen → Annotationen speichern → am Ende das verifizierte Listing.
@@ -89,6 +93,10 @@ Eine zweite Ausführung mit demselben `--project` fragt das Modell nur noch nach
 - **Hardware**: `LD BC,&7F8D` + `OUT (C),C` → `LD BC,GATE_ARRAY+&8D` mit dem Kommentar
   *Gate Array: screen mode 1, lower ROM off, upper ROM off*. Erkannt werden Gate Array, CRTC, ROM-Auswahl,
   Drucker, PPI und Disc-Ports, auch bei `LD B,n` / `LD A,n` / `OUT (C),A` (der Wert in `A` wird verfolgt).
+- **Idiome, die man leicht falsch liest**, werden erklärt: `LD SP,&C000` (der Stack wächst *abwärts*, er liegt
+  unterhalb von &C000, nicht im Bildschirm), `HALT`, `IM 1/2` und das Installieren eines Interrupt-Handlers
+  (`LD A,&C3` / `LD (&0038),A` / `LD HL,x` / `LD (&0039),HL` → „Handler bei x“). Auslöser war ein echter Lauf, in dem ein
+  Modell genau das als „Scroll-Register“ missdeutet hat.
 - **Bildschirmadressen**: `LD DE,&C78A` bekommt den Hinweis *char row 24, byte column 10, scan line 0*.
 - **Variablen und Tabellen**: `LD A,(&A010)` → `LD A,(run_counter)` sobald benannt; Zeiger auf noch
   unbenannte Daten erscheinen als `data_xxxx`, Sprungziele als `sub_xxxx`/`loc_xxxx` (Platzhalter,

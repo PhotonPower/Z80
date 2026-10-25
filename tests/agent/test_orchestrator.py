@@ -109,12 +109,14 @@ def plans_for(sym):
             [("document_routine", {"addr": h("PRINT"), "name": "print_string", "summary": "Prints a zero terminated string.",
                                    "inputs": "HL = text", "outputs": "HL behind the terminator", "clobbers": "AF HL"})],
             [("finish_routine", {"summary": "done"})],
+            [("finish_routine", {})],
         ],
         h("DRAW8"): [
             [("run_routine", {"addr": h("DRAW8"), "registers": {"HL": sprite, "DE": "0xC78A"}, "screenshot": True})],
             [("name_label", {"addr": h("D1"), "name": "sprite_row_loop"}),
              ("document_routine", {"addr": h("DRAW8"), "name": "draw_sprite_8x8", "summary": "Copies an 8x8 byte sprite to the screen.",
                                    "inputs": "HL = sprite data, DE = screen address", "clobbers": "AF BC DE HL"})],
+            [("finish_routine", {})],
             [("finish_routine", {})],
         ],
         h("START"): [
@@ -124,6 +126,7 @@ def plans_for(sym):
              ("mark_data", {"addr": sprite, "length": 8, "kind": "bytes", "name": "face_sprite"}),
              ("add_comment", {"addr": h("START"), "text": "program entry"}),
              ("document_routine", {"addr": h("START"), "name": "show_greeting_demo", "summary": "Sets mode 1, prints HELLO and draws a face."})],
+            [("finish_routine", {})],
             [("finish_routine", {})],
         ],
     }
@@ -331,14 +334,17 @@ class HardeningTest(unittest.TestCase):
                                   "memory": [{"addr": msg, "hex": "0x48 45 4c 4c 4f 00"}], "verbose": True})],
                 [("document_routine", {"addr": h("PRINT"), "name": "print_string", "summary": "Prints text.", "clobbers": "AF HL"})],
                 [("finish_routine", {})],
+                [("finish_routine", {})],
             ]
             plans[h("DRAW8")] = [   # the model writes its calls into the message text
                 {"as_text": [("run_routine", {"addr": h("DRAW8"), "registers": {"HL": f"0x{sym['SPRITE']:04X}", "DE": "0xC78A"}, "screenshot": "true"})]},
                 {"as_text": [("document_routine", {"addr": h("DRAW8"), "name": "draw_sprite_8x8", "summary": "Draws a sprite."})]},
                 {"as_text": [("finish_routine", {})]},
+                {"as_text": [("finish_routine", {})]},
             ]
             plans[h("START")] = [   # arguments delivered as JSON strings
                 {"json_string": [("document_routine", {"addr": h("START"), "name": "show_greeting_demo", "summary": "Demo."})]},
+                {"json_string": [("finish_routine", {})]},
                 {"json_string": [("finish_routine", {})]},
             ]
             mock = MockOllama(plans)
@@ -394,7 +400,7 @@ class HardeningTest(unittest.TestCase):
             sna, sym = build_snapshot(d)
             addr = f"0x{sym['PRINT']:04x}"
             plans = {addr: [[("document_routine", {"addr": addr, "name": "print_string", "summary": "Prints text."})],
-                            [("finish_routine", {})]]}
+                            [("finish_routine", {})], [("finish_routine", {})]]}
             mock = MockOllama(plans, truncate_first=2)   # like a model that thinks until the token limit
             host = mock.start()
             try:
@@ -406,6 +412,50 @@ class HardeningTest(unittest.TestCase):
             self.assertIn("--think false", printed)
             self.assertTrue(mock.hints, "the model must be told that its answer was cut off")
             self.assertIn("1 routines documented", printed)   # and it recovered
+
+    def test_finish_is_checked_once_for_completeness(self):
+        with tempfile.TemporaryDirectory() as d:
+            sna, sym = build_snapshot(d)
+            addr = f"0x{sym['DRAW8']:04x}"
+            loop = f"0x{sym['D1']:04x}"
+            plans = {addr: [
+                [("document_routine", {"addr": addr, "name": "draw_sprite_8x8", "summary": "Draws a sprite."})],
+                [("finish_routine", {})],                                       # too early: loop label unnamed, no comments
+                [("name_label", {"addr": loop, "name": "row_loop"}),
+                 ("add_comment", {"addr": loop, "text": "one sprite row per pass"}),
+                 ("add_comment", {"addr": addr, "text": "eight rows"})],
+                [("finish_routine", {})],                                       # now complete
+            ]}
+            mock = MockOllama(plans)
+            host = mock.start()
+            try:
+                code, printed = OrchestratorTest("run_main").run_main(["--sna", sna, "--host", host, "--model", "mock", "--only", addr,
+                                                                       "--max-turns", "6", "--z80tool", Z80TOOL])
+            finally:
+                mock.stop()
+            self.assertEqual(code, 0, printed)
+            self.assertIn("1 routines documented", printed)
+            warning = next(r for r in mock.tool_results if r.startswith("not finished yet"))
+            self.assertIn(f"loc_{sym['D1']:04x}", warning)     # names the label that is still automatic
+            self.assertIn("comment(s) for", warning)
+            self.assertIn("second call is accepted as final", warning)
+            # the second finish after fixing the problems goes through without another warning
+            self.assertEqual(len({r for r in mock.tool_results if r.startswith("not finished yet")}), 1)  # the history repeats; count distinct messages
+
+    def test_finish_second_call_is_final_even_if_incomplete(self):
+        with tempfile.TemporaryDirectory() as d:
+            sna, sym = build_snapshot(d)
+            addr = f"0x{sym['PRINT']:04x}"
+            plans = {addr: [[("document_routine", {"addr": addr, "name": "print_string", "summary": "x"})],
+                            [("finish_routine", {})], [("finish_routine", {})]]}
+            mock = MockOllama(plans)
+            host = mock.start()
+            try:
+                code, printed = OrchestratorTest("run_main").run_main(["--sna", sna, "--host", host, "--model", "mock", "--only", addr,
+                                                                       "--max-turns", "5", "--z80tool", Z80TOOL])
+            finally:
+                mock.stop()
+            self.assertIn("1 routines documented", printed)    # the model is never trapped by the check
 
     def test_repeated_failures_get_a_hint(self):
         with tempfile.TemporaryDirectory() as d:

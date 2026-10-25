@@ -337,6 +337,7 @@ class Tools:
     def reset_routine(self):
         self.images.clear()
         self.finished = False
+        self.finish_warned = False
 
     def dispatch(self, name, args):
         name = clean_tool_name(name)
@@ -396,17 +397,24 @@ class Tools:
         r = reply["regs"]
         out.append("registers after: " + "  ".join(f"{k}={r[k]}" for k in ("AF", "BC", "DE", "HL", "IX", "IY", "SP")) + f'  flags={r["flags"]}')
         if reply["stop"] != "address":
-            out.append("NOTE: the routine did not return normally (check the stop reason).")
+            out.append(f'NOTE: it did not return (stop: {reply["stop"]}). For a program entry or a main loop that is normal: the state shown is the '
+                       f'state after {reply["instructions"]} instructions. Use a smaller max_instructions to look at an earlier moment.')
 
         sp = int(r["SP"], 16)
         diff = s.ok(cmd="diff", name="baseline")
         shown = [x for x in diff["ranges"] if not (sp - 0x40 <= int(x["addr"], 16) < sp + 0x40)]
-        if shown:
-            out.append(f'memory changed ({diff["changed_bytes"]} bytes; stack area omitted):')
-            for x in shown[:12]:
+        screen = [x for x in shown if int(x["addr"], 16) >= 0xC000]
+        other = [x for x in shown if int(x["addr"], 16) < 0xC000]
+        if other:
+            out.append(f"memory changed outside the screen RAM ({len(other)} ranges; stack area omitted; small ranges first):")
+            for x in sorted(other, key=lambda x: (x["len"], int(x["addr"], 16)))[:14]:
                 out.append(f'  {x["addr"]} len {x["len"]}: {x["before"][:32]} -> {x["after"][:32]}')
+            if len(other) > 14:
+                out.append(f"  ... and {len(other) - 14} larger ranges (use read_memory to look at them)")
         else:
-            out.append("memory changed: nothing outside the stack")
+            out.append("memory changed outside the screen RAM: nothing")
+        if screen:
+            out.append(f"screen RAM (&C000-&FFFF) changed in {len(screen)} ranges, {sum(x['len'] for x in screen)} bytes")
 
         fw = s.ok(cmd="firmware_log")["calls"]
         if fw:
@@ -477,14 +485,43 @@ class Tools:
         self.s.ok(cmd="ann_comment", addr=norm_addr(addr), text=text, block=bool(block))
         return "ok"
 
+    def completeness_problems(self):
+        """What is still missing in the current routine's listing (names, comments)."""
+        if not self.range:
+            return []
+        r = self.s.ok(cmd="listing", verify=False, max_chars=200000, **{"from": self.range[0], "to": self.range[1]})
+        text = r["text"]
+        problems = []
+        unnamed = re.findall(r"^((?:loc|sub|data)_[0-9a-f]{4}):", text, re.M)
+        if unnamed:
+            problems.append(f"labels without a real name: {', '.join(unnamed[:8])}{' ...' if len(unnamed) > 8 else ''} (name_label)")
+        numeric = sorted(set(re.findall(r"\(&([0-9A-F]{4})\)", text)))
+        numeric = [a for a in numeric if int(a, 16) >= 0x0040]
+        if numeric:
+            problems.append("memory locations used by number without a name: " + ", ".join("&" + a for a in numeric[:8]) +
+                            (" ..." if len(numeric) > 8 else "") + " (name_variable, or mark_data for tables)")
+        wanted = max(2, r["instructions"] // 10)
+        if r["user_comments"] < wanted:
+            problems.append(f"only {r['user_comments']} comment(s) for {r['instructions']} instructions - add about {wanted} short ones with add_comment "
+                            "(explain meaning and purpose of the non-obvious steps)")
+        return problems
+
     def t_finish_routine(self, summary=""):
         still_open = {r["addr"].lower() for r in self.s.ok(cmd="routines", undocumented_only=True)["routines"]}
         if self.current and self.current.lower() in still_open:
             return "error: call document_routine for this routine first (name, summary, inputs, outputs, clobbers)."
+        if not self.finish_warned:
+            self.finish_warned = True
+            problems = self.completeness_problems()
+            if problems:
+                return ("not finished yet - the listing of this routine is still incomplete:\n- " + "\n- ".join(problems) +
+                        "\nFix this with the annotation tools, then call finish_routine again (a second call is accepted as final).")
         self.finished = True
         return "ok: routine finished"
 
     current = None  # address (hex string) of the routine being processed
+    range = None    # (first, last) address of that routine
+    finish_warned = False
 
 
 # --------------------------------------------------------------------------------------------
@@ -508,6 +545,14 @@ Z80 facts that are easy to get wrong: in `OUT (C),r` and `IN r,(C)` the port add
 C = low byte), not just C. So `LD BC,GATE_ARRAY+&8C` / `OUT (C),C` writes the value &8C (the low byte) to the Gate Array port &7F00 - the comment
 on the OUT line already tells you what that does; trust it. `LD B,HIGH(GATE_ARRAY)` / `OUT (C),A` writes A to the Gate Array. Addresses written
 `&1234` are hexadecimal.
+
+More facts: the stack grows DOWNWARDS, so `LD SP,&C000` puts the stack in the RAM just below the screen memory (it does not use the
+screen). With interrupt mode 1 every interrupt jumps to &0038; `LD A,&C3` / `LD (&0038),A` / `LD HL,x` / `LD (&0039),HL` installs `JP x` there,
+i.e. an interrupt handler at x. Registers such as IY often point to a table of game variables; name fields you can identify, e.g. `(IY+8)`.
+
+Do not finish early. Before finish_routine: give EVERY label a name (loops, branch targets still called loc_/sub_/data_), name every memory
+location the code uses (name_variable, with a comment on its meaning), mark tables and strings (mark_data) and add a short comment (add_comment)
+to every non-obvious step. finish_routine checks this once and tells you what is missing.
 
 Be brief. Do not re-derive Z80 basics and do not repeat yourself. Your FIRST reply must already be a tool call (usually run_routine). Prefer
 testing over long reasoning: a run tells you more than a page of thinking.
@@ -585,6 +630,7 @@ class Annotator:
         t = self.tools
         t.reset_routine()
         t.current = r["addr"]
+        t.range = (r["addr"], f'0x{int(r["addr"], 16) + max(r["size"], 1) - 1:04X}')
         messages = [{"role": "system", "content": SYSTEM_PROMPT.format(lang=self.a.lang)},
                     {"role": "user", "content": self.routine_prompt(r)}]
         nudges = 0

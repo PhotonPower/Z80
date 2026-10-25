@@ -291,7 +291,7 @@ Json Session::Impl::cmdListing() {
     }
     j.set("verified", r.verified).set("verify_detail", r.verifyDetail);
     j.set("from", hex16(r.from)).set("to", hex16(r.to)).set("instructions", r.instructions);
-    j.set("named_labels", r.namedLabels).set("auto_labels", r.autoLabels);
+    j.set("named_labels", r.namedLabels).set("auto_labels", r.autoLabels).set("user_comments", r.userComments);
     return j;
 }
 
