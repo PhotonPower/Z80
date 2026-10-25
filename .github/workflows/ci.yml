@@ -24,9 +24,11 @@ jobs:
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DZ80_WARNINGS_AS_ERRORS=${{ matrix.werror }}
       - name: Build
-        run: cmake --build build --config Release
+        shell: bash
+        run: cmake --build build --config Release 2>&1 | tee build.log; test ${PIPESTATUS[0]} -eq 0 || python3 tools/ci_annotate.py "build failed" build.log
       - name: Test
-        run: ctest --test-dir build -C Release --output-on-failure
+        shell: bash
+        run: ctest --test-dir build -C Release --output-on-failure 2>&1 | tee test.log; test ${PIPESTATUS[0]} -eq 0 || python3 tools/ci_annotate.py "tests failed" test.log
 
   sanitizers:
     name: AddressSanitizer + UBSan

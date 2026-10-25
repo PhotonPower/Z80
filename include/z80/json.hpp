@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <stdexcept>
+#include <type_traits>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -21,10 +22,10 @@ public:
     Json() = default;
     Json(std::nullptr_t) {}
     Json(bool v) : type_(Type::Bool), bool_(v) {}
-    Json(int v) : Json(static_cast<std::int64_t>(v)) {}
-    Json(unsigned v) : Json(static_cast<std::int64_t>(v)) {}
-    Json(std::int64_t v) : type_(Type::Number), int_(v), num_(static_cast<double>(v)), isInt_(true) {}
-    Json(std::uint64_t v) : Json(static_cast<std::int64_t>(v)) {}
+    /// Any integer type (int, size_t, uint64_t, ...); a template avoids overload ambiguities between
+    /// platforms where e.g. size_t and uint64_t are different types.
+    template <class T, std::enable_if_t<std::is_integral_v<T> && !std::is_same_v<T, bool>, int> = 0>
+    Json(T v) : type_(Type::Number), int_(static_cast<std::int64_t>(v)), num_(static_cast<double>(v)), isInt_(true) {}
     Json(double v) : type_(Type::Number), num_(v) {}
     Json(const char* v) : type_(Type::String), str_(v) {}
     Json(std::string v) : type_(Type::String), str_(std::move(v)) {}
