@@ -1,0 +1,5 @@
+; Comment file for the disassembler:  address,"text"
+; Addresses may be decimal, &hex, $hex or 0xhex.
+&4000,"entry: print the message below"
+&4003,"fetch the next character"
+&BB5A,"firmware: TXT OUTPUT"
