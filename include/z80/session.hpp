@@ -2,6 +2,7 @@
 
 #include <deque>
 #include <map>
+#include <memory>
 #include <string>
 #include <string_view>
 
@@ -43,7 +44,8 @@ private:
     struct Impl;
 
     SessionOptions options_;
-    Memory memory_;
+    std::unique_ptr<Memory> memoryStore_;  // heap: a Session is ~64 KiB, keep it off small stacks
+    Memory& memory_;
     Cpu cpu_;
     std::map<std::string, Symbol> symbols_;
     std::map<std::string, Snapshot> checkpoints_;

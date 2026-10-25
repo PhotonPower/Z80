@@ -489,7 +489,8 @@ struct Session::Impl {
     }
 };
 
-Session::Session(SessionOptions options) : options_(options), cpu_(memory_) {
+Session::Session(SessionOptions options)
+    : options_(options), memoryStore_(std::make_unique<Memory>()), memory_(*memoryStore_), cpu_(memory_) {
     cpu_.setPortHandlers(
         [this](Word) -> Byte {
             if (input_.empty()) return 0xFF;

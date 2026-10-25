@@ -1,3 +1,4 @@
+#include <memory>
 #include <random>
 
 #include "test_util.hpp"
@@ -10,7 +11,10 @@ using namespace z80;
 namespace {
 
 struct Machine {
-    Memory memory;
+    // The 64 KiB live on the heap: MSVC does not overlap the stack slots of sibling scopes, and
+    // this file creates dozens of machines in one function.
+    std::unique_ptr<Memory> store = std::make_unique<Memory>();
+    Memory& memory = *store;
     Cpu cpu{memory};
 
     /// Assembles `source` into memory and points PC at the first byte.
