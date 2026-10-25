@@ -72,6 +72,28 @@ Eine vollständige Beispielsitzung liegt in `examples/agent_session.jsonl`:
 | `reset` | `memory?` | CPU zurücksetzen (mit `memory:true` auch RAM löschen) |
 | `symbols` | – | Marken des letzten `asm` |
 | `help` | – | Befehlsliste |
+| `machine` | `type:"cpc"` | CPC-Modus: Videohardware (Gate Array/CRTC), Firmware-Stubs, Bildschirm; setzt einen Stack unterhalb des Bildschirms |
+| `load_sna` | `file`, `state?` | CPC-Snapshot inkl. Register und Videozustand laden (*braucht `--allow-files`*) |
+| `load_rom` | `file`, `which` (`lower`, `upper`, `both`) | ROM-Abbild; blendet sich wie auf der Hardware ein/aus; ersetzt die Firmware-Stubs (*braucht `--allow-files`*) |
+| `video` | – | Modus, Farben der 16 Stifte, Rand, CRTC-Register |
+| `screen` | `name?`, `border?`, `crop?{col0,row0,col1,row1}`, `zoom?` | Bildschirm als PNG (`png_base64`), 640 px breit; `crop` in Textzellen (80×25), `zoom` 1–16 |
+| `screen_diff` | `a`, `b?` | Vergleich gespeicherter Bilder: `changed_pixels`, `bbox`, `text_cells`, `changed_percent` |
+| `screens` / `screen_drop` | `name` | gespeicherte Bilder auflisten / löschen |
+| `firmware_log` | `clear?` | abgefangene Firmware-Aufrufe mit Registern |
+| `console` | `clear?` | über `TXT_OUTPUT` ausgegebener Text (Stubs) |
+| `analyze` | `entries[]`, `extend?`, `inline_strings[]`, `inline_kind?`, `linear?{from,to}`, `reset?` | Codefluss analysieren (nötig für `routines` und `listing`) |
+| `routines` | `order?` (`bottom_up`, `address`), `undocumented_only?` | Unterprogramme mit Größe, Aufrufern, Aufgerufenen, Tiefe; `external_calls` (Firmware/nicht analysiert) |
+| `listing` | `from?`, `to?`, `verify?`, `max_chars?` | kommentiertes, **neu assemblierbares** Listing; `verified` = identische Bytes |
+| `ann_label`, `ann_routine`, `ann_variable`, `ann_data`, `ann_comment`, `ann_remove`, `ann_title`, `ann_list` | siehe `help` | Namen und Kommentare; ungültige/doppelte/reservierte Namen werden mit Begründung abgewiesen |
+| `ann_save` / `ann_load` | `file` | Annotationen als JSON speichern / laden (*braucht `--allow-files`*) |
+
+`run` und `call` akzeptieren zusätzlich `irq_every_cycles` (Interrupt alle n T-States). `read` und `dis`
+zeigen standardmäßig das **RAM**; mit `"view":"cpu"` sieht man, was die CPU mit eingeblendeten ROMs sieht.
+`io` liefert bei CPC-Maschinen ein Feld `what` mit der Wirkung des Zugriffs.
+Checkpoints sichern auch den Videozustand.
+
+Für das Kommentieren von Programmen mit einem Sprachmodell siehe
+[reverse-engineering.md](reverse-engineering.md).
 
 ## Typischer Ablauf
 

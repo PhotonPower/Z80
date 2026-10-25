@@ -37,6 +37,15 @@ für einen lokalen LLM-Agenten gedacht; geplant ist außerdem der Ausbau zu eine
   (assemblieren, ausführen, Register/Speicher lesen und setzen, `call`, `diff`, Checkpoints …),
   Dateizugriff nur mit `--allow-files` ([docs/agent-protocol.md](docs/agent-protocol.md))
 
+**Reverse Engineering mit lokalem LLM** ([docs/reverse-engineering.md](docs/reverse-engineering.md))
+- `agent/z80_annotate.py` lässt ein Modell über **Ollama** (z. B. **Qwen3-VL**) Unterprogramm für
+  Unterprogramm analysieren: lesen, im Emulator **ausführen und testen**, **Screenshots anfordern**
+  (als Bild, auf den geänderten Bereich zugeschnitten), und dann Namen und Kommentare vergeben
+- Ergebnis: ein kommentiertes Listing mit sinnvollen Namen, Firmware-Aufrufen (`CALL TXT_OUTPUT`) und
+  Hardware-Zugriffen (`GATE_ARRAY+&8D`, mit Erklärung) als Symbole – **neu assembliert und Byte für Byte
+  verifiziert**, das Modell kann den Code also nicht verändern
+- Amstrad CPC: 231 Firmware-Einträge, Gate Array/CRTC/PPI, Videorendering (Modi 0–2), Snapshots, ROMs
+
 **Monitor** ([docs/monitor.md](docs/monitor.md)) – `z80tool monitor`
 - klassische Eingabeschleife mit Hex-Standard: disassemblieren (`d`), Speicher ansehen/ändern/
   füllen/kopieren/suchen (`m e f t h c`), **Zeilen assemblieren** (`a`), Register (`r`)
@@ -98,6 +107,7 @@ $ z80tool dis hello.bin --org 0x4000 --asm -o re.asm && z80tool asm re.asm -o re
 | [docs/usage.md](docs/usage.md)                          | Kommandozeile, alle Optionen, Rezepte               |
 | [docs/assembler-syntax.md](docs/assembler-syntax.md)    | Quelltextformat, Ausdrücke, Pseudobefehle           |
 | [docs/formats.md](docs/formats.md)                      | Kommentardatei, `.sna`, Intel HEX, Ausgabeformate   |
+| [docs/reverse-engineering.md](docs/reverse-engineering.md) | Programme mit Ollama/Qwen3-VL kommentieren       |
 | [docs/monitor.md](docs/monitor.md)                      | Monitor: Befehle, Zahlenschreibweise, Beispiel     |
 | [docs/emulator.md](docs/emulator.md)                    | Z80-Emulator: API, Genauigkeit, Zustand speichern  |
 | [docs/agent-protocol.md](docs/agent-protocol.md)        | JSON-Protokoll für LLM-Agenten (`z80tool serve`)   |
@@ -113,7 +123,8 @@ $ z80tool dis hello.bin --org 0x4000 --asm -o re.asm && z80tool asm re.asm -o re
 include/z80/   öffentliche Header der Bibliothek (z80core)
 src/           Implementierung
 app/main.cpp   Kommandozeilenwerkzeug z80tool
-tests/         Unit- und Property-Tests (CTest)
+agent/         Orchestrator für Ollama (Python, nur Standardbibliothek)
+tests/         Unit- und Property-Tests (CTest), tests/agent: Orchestrator gegen einen Mock-Ollama
 tools/         Entwicklerwerkzeuge (Kreuzprüfung gegen z80asm, ZEXDOC/ZEXALL-Runner)
 examples/      Beispielprogramm und Kommentardatei
 docs/          Dokumentation
@@ -124,6 +135,8 @@ docs/          Dokumentation
 - Nur **dokumentierte** Befehle. Undokumentierte Opcodes (`SLL`, `IXH`/`IXL`, `IN F,(C)`, …) werden
   vom Disassembler als `DB` ausgegeben und vom Assembler nicht akzeptiert.
 - Keine Makros, bedingte Assemblierung oder `INCLUDE`.
+- Der Orchestrator wurde noch nicht mit einem echten Qwen3-VL ausprobiert (nur gegen einen Mock-Server);
+  Prompt und Parameter brauchen vermutlich Feinschliff.
 - Der Emulator rechnet pro Befehl, nicht pro Bus-Zyklus (keine Wait-States/Contention); nur ein
   Speicher-Layout (flache 64 KiB, keine Bank-Umschaltung).
 - Der Monitor hat keine eigene Zeilenbearbeitung (Tipp: `rlwrap z80tool monitor`) und assembliert

@@ -28,6 +28,7 @@ Weitere CMake-Optionen:
   (`tools/crosscheck_z80asm.py`, siehe [docs/testing.md](docs/testing.md)).
 - Änderungen am Emulator müssen ZEXDOC und ZEXALL weiter bestehen (`z80_zex`, siehe
   [docs/testing.md](docs/testing.md)); die CI prüft das.
+- Änderungen am Orchestrator (`agent/`) müssen `tests/agent` bestehen (läuft in CTest, wenn Python 3 vorhanden ist).
 - Die Kernbibliothek (`include/z80`, `src`) hat keine Ein-/Ausgabe auf der Konsole und keine
   globalen Zustände; Benutzerinteraktion gehört nach `app/`.
 - Quelltext, Bezeichner und Kommentare sind Englisch, die Dokumentation unter `docs/` Deutsch.

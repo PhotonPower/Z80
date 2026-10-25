@@ -7,6 +7,14 @@ die Versionierung an [Semantic Versioning](https://semver.org/lang/de/).
 ## [Unreleased]
 
 ### Hinzugefügt
+- **Kommentieren mit lokalem LLM**: `agent/z80_annotate.py` (Ollama, Tool-Calling, Screenshots als Bilder),
+  Annotationsmodell (`z80::Annotations`), **verifiziertes** Listing (`renderListing`: Namen, Routinenköpfe,
+  Datenregionen, `EQU`-Blöcke; wird neu assembliert und mit dem Speicher verglichen).
+- **Amstrad CPC** (`z80::cpc`): 231 Firmware-Symbole (aus zwei Quellen abgeglichen, `tools/gen`), Hardware-Ports
+  mit Erklärung der Zugriffe, Videohardware (Gate Array/CRTC), Rendering der Modi 0–2 als PNG (eigener
+  Encoder), Bildschirm-Vergleich, `.sna`-Header, ROM-Überlagerung, Firmware-Stubs mit Protokoll.
+- Session-Befehle `machine`, `load_sna`, `load_rom`, `video`, `screen`, `screen_diff`, `analyze`, `routines`,
+  `listing`, `ann_*`, `firmware_log`, `console`; Checkpoints sichern den Videozustand; `irq_every_cycles`.
 - **Monitor** (`z80tool monitor`, Klasse `z80::Monitor`): Disassemblieren, Speicherbefehle, zeilenweises
   Assemblieren, Register, Einzelschritt/Step over/bis Rückkehr/Lauf, Haltepunkte, Watchpoints,
   Checkpoints, Symbole, Dateibefehle; Zahlen standardmäßig hexadezimal.

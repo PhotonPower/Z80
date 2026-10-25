@@ -285,7 +285,7 @@ int runMonitor(Args args) {
     z80::Monitor monitor(options);
     if (!image.empty()) {
         const auto data = z80::readFile(image);
-        if (z80::looksLikeSna(data)) monitor.memory() = z80::loadSna(data);
+        if (z80::looksLikeSna(data)) monitor.memory().load(0, z80::loadSna(data).bytes());
         else monitor.memory().load(org, data);
     }
 
