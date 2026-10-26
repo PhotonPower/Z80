@@ -7,6 +7,9 @@ die Versionierung an [Semantic Versioning](https://semver.org/lang/de/).
 ## [Unreleased]
 
 ### Behoben
+- Orchestrator: Ein ungültiger Tool-Aufruf des Modells (Ollama `HTTP 500 invalid character 'x' …`, z. B. nackte `0x0C5A`) beendete
+  den ganzen Lauf. Jetzt: Hinweis ans Modell und neue Anfrage; ein Serverfehler bei einer Routine überspringt nur diese;
+  erst drei in Folge (oder ein Fehler vor der ersten Antwort) beenden den Lauf. Der Prompt verlangt Hexwerte als Strings.
 - Die Ausdehnung einer Routine endete am ersten unbedingten Sprung: bei einer Hauptschleife sah das Modell nur den ersten Teil
   (137 von etwa 250 Bytes). Sie umfasst jetzt alles, was die Sprünge erreichen (Aufrufe ausgenommen).
 - Orchestrator: Rundenlimit trotz fast fertiger Arbeit zählte als Fehlschlag; jetzt „partial“, Warnung vor den letzten Runden,

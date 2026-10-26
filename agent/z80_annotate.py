@@ -80,6 +80,10 @@ class OllamaError(RuntimeError):
     pass
 
 
+class OllamaFormatError(OllamaError):
+    """Ollama could not parse what the model wrote as a tool call (usually invalid JSON, e.g. a bare 0x1234 instead of "0x1234")."""
+
+
 class Ollama:
     retry_delay = 2  # seconds, multiplied by the attempt number
 
@@ -119,6 +123,8 @@ class Ollama:
                     return json.loads(resp.read())
             except urllib.error.HTTPError as e:  # the server answered: do not retry client errors
                 detail = e.read().decode(errors="replace")[:500]
+                if e.code == 500 and re.search(r"invalid character|unexpected end of JSON|cannot unmarshal|error parsing tool call|invalid JSON", detail, re.I):
+                    raise OllamaFormatError(detail) from e  # the model's fault, not the server's: retrying the same request is pointless
                 if e.code == 400 and "think" in detail.lower() and "think" in body:
                     # the model has no thinking mode: ask again without the parameter, and remember
                     self.think = None
@@ -603,6 +609,8 @@ Do not finish early. Before finish_routine: give EVERY label a name (loops, bran
 location the code uses (name_variable, with a comment on its meaning), mark tables and strings (mark_data) and add a short comment (add_comment)
 to every non-obvious step. finish_routine checks this once and tells you what is missing.
 
+JSON: write every tool argument as valid JSON. Addresses and hex values are STRINGS in quotes ("0x0C5A"), never bare 0x0C5A (that makes the call fail).
+
 Efficiency: you may and should make SEVERAL tool calls in ONE reply (for example all name_variable and add_comment calls together, then
 finish_routine). Every reply costs time, and you only have a limited number of replies per routine.
 
@@ -638,6 +646,8 @@ class Annotator:
         self.tools = Tools(server, irq=getattr(args, "irq", 0))
 
     said_thinking = False
+    chat_ok = False        # becomes True with the first successful answer: errors before that are configuration problems
+    model_errors = 0       # consecutive routines that failed because of the model server
 
     def say(self, text):
         print(text, flush=True)
@@ -712,6 +722,7 @@ class Annotator:
                     {"role": "user", "content": self.routine_prompt(r, gaps)}]
         nudges = 0
         cut = 0
+        bad_json = 0
         repeats = {}
         try:
             for turn in range(self.max_turns):
@@ -719,7 +730,18 @@ class Annotator:
                     messages.append({"role": "user", "content": "Only 3 rounds are left for this routine. In your next reply call ALL remaining annotation tools "
                                                                 "together (several tool calls in one reply are fine) and finish_routine."})
                 compact_messages(messages, max_chars=self.a.num_ctx * 3)
-                resp = self.llm.chat(messages, TOOLS)
+                try:
+                    resp = self.llm.chat(messages, TOOLS)
+                except OllamaFormatError as e:
+                    bad_json += 1
+                    self.say(f"  the model wrote an invalid tool call ({bad_json}x): {str(e)[:110]}")
+                    self.log_event(routine=r["addr"], turn=turn, invalid_tool_call=str(e)[:300])
+                    if bad_json > 4:
+                        return False
+                    messages.append({"role": "user", "content": "Your last tool call could not be parsed because it was not valid JSON. Write ALL arguments as valid JSON: "
+                                                                'addresses and hex values MUST be strings in quotes, e.g. "0x0C5A" - never a bare 0x0C5A. Try again.'})
+                    continue
+                self.chat_ok = True
                 msg = resp.get("message", {})
                 if msg.get("thinking") and not self.llm.think and not self.said_thinking:
                     self.said_thinking = True
@@ -777,6 +799,25 @@ class Annotator:
         finally:
             t.current = None
 
+    def process_routine_safely(self, r, gaps=None):
+        """A server error on one routine must not end a run that may have taken hours: note it, go on with the next one.
+
+        Errors before the first successful answer (wrong host, unknown model) are configuration problems and abort at once;
+        three routines in a row failing means the server is really gone."""
+        try:
+            result = self.process_routine(r, gaps)
+            self.model_errors = 0
+            return result
+        except OllamaError as e:
+            if not self.chat_ok:
+                raise
+            self.model_errors += 1
+            self.say(f'  model error on {r["addr"]}: {str(e)[:160]} - skipping this routine ({self.model_errors} in a row)')
+            self.log_event(routine=r["addr"], model_error=str(e)[:300])
+            if self.model_errors >= 3:
+                raise
+            return False
+
     # ---- gaps ----
     def routine_gaps(self, r):
         """Objective list of what is missing or doubtful about a routine's documentation."""
@@ -805,7 +846,7 @@ class Annotator:
             tried |= {r["addr"] for r in routines}
             for i, r in enumerate(routines, 1):
                 self.say(f'[{i}/{len(routines)}] {r["name"]} at {r["addr"]} ({r["size"]} bytes)')
-                done[self.process_routine(r)] += 1
+                done[self.process_routine_safely(r)] += 1
                 self.save()
         return done
 
@@ -820,7 +861,7 @@ class Annotator:
         self.say(f"{len(todo)} of {len(routines)} routines have gaps")
         for i, (r, gaps) in enumerate(todo, 1):
             self.say(f'[{i}/{len(todo)}] {r["name"]} at {r["addr"]}: ' + "; ".join(g.split(" (")[0] for g in gaps)[:140])
-            done[self.process_routine(r, gaps)] += 1
+            done[self.process_routine_safely(r, gaps)] += 1
             self.save()
         return done
 

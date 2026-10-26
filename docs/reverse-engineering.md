@@ -214,6 +214,16 @@ Echte Modelle machen Formatfehler; der Orchestrator fängt die häufigen ab (all
 - `run_routine` ist auf 5 Millionen Befehle begrenzt; Endlosschleifen halten an
 - das Listing ist am Ende **immer** korrekt, auch wenn das Modell nichts oder Unsinn liefert
 
+## Wenn etwas schiefgeht
+
+| Meldung | Bedeutung und Verhalten |
+|---|---|
+| `the model wrote an invalid tool call` / Ollama `HTTP 500 … invalid character 'x' …` | Das Modell hat ein Argument als ungültiges JSON geschrieben (typisch: nackte `0x0C5A` statt `"0x0C5A"`). Das ist ein Fehler der Modellantwort, nicht des Servers. Der Orchestrator weist das Modell darauf hin und fragt neu (bis zu 4-mal je Routine). |
+| `model error on 0x…: … - skipping this routine` | Der Server ist bei **einer** Routine gescheitert (z. B. Modell abgestürzt). Sie wird übersprungen, der Lauf geht weiter; beim nächsten Start mit demselben `--project` wird sie erneut versucht. Nach drei Routinen in Folge endet der Lauf (Server vermutlich weg). |
+| `cannot reach Ollama …` / `HTTP 404` vor der ersten Antwort | Konfigurationsproblem (Host, Modellname): sofortiger Abbruch mit Rückgabewert 2. |
+| `answer cut off at the token limit` | siehe oben: Antwortlimit wird automatisch erhöht. |
+| `turn limit reached … counted as partial` | Routine ist dokumentiert, aber `finish_routine` fehlte; ein Refine-Durchgang prüft sie. |
+
 ## Grenzen
 
 - Nur flache 64 KiB (128K-Banking der CPC 6128 fehlt), nur Modi 0–2, kein Blinken, kein CRTC-Timing,

@@ -20,6 +20,7 @@ from mock_ollama import MockOllama  # noqa: E402
 spec = importlib.util.spec_from_file_location("z80_annotate", os.path.join(ROOT, "agent", "z80_annotate.py"))
 annotate = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(annotate)
+annotate.Ollama.retry_delay = 0  # never wait between retries in tests (every test class, in any order)
 
 Z80TOOL = os.environ.get("Z80TOOL") or os.path.join(ROOT, "build", "z80tool")
 
@@ -636,6 +637,73 @@ class HardeningTest(unittest.TestCase):
             self.assertTrue(any("Only 3 rounds are left" in m["content"] for r in mock.requests for m in r["messages"] if m["role"] == "user"),
                             "the model must be told when only a few rounds remain")
             self.assertIn("SEVERAL tool calls in ONE reply", mock.requests[0]["messages"][0]["content"])
+
+    def test_invalid_json_in_a_tool_call_is_recovered_not_fatal(self):
+        with tempfile.TemporaryDirectory() as d:
+            sna, sym = build_snapshot(d)
+            addr = f"0x{sym['PRINT']:04x}"
+            plans = {addr: [[("document_routine", {"addr": addr, "name": "print_string", "summary": "Prints text."})],
+                            [("finish_routine", {})], [("finish_routine", {})]]}
+            mock = MockOllama(plans, invalid_json_first=2)     # Ollama answers HTTP 500 "invalid character 'x' ..." twice
+            host = mock.start()
+            try:
+                code, printed = OrchestratorTest("run_main").run_main(["--sna", sna, "--host", host, "--model", "mock", "--only", addr,
+                                                                       "--max-turns", "8", "--z80tool", Z80TOOL])
+            finally:
+                mock.stop()
+            self.assertEqual(code, 0, printed)
+            self.assertIn("the model wrote an invalid tool call (2x)", printed)
+            self.assertIn("pass 1: 1 routines finished", printed)
+            self.assertTrue(mock.json_hints)
+            self.assertIn('"0x0C5A"', mock.json_hints[0])                 # tells how to write addresses
+            self.assertEqual(mock.invalid_json_served, 2)                   # each failure was asked once, not retried blindly three times
+            self.assertEqual(len(mock.requests), 3)                         # plus the three answers that were understood
+
+    def test_a_server_error_on_one_routine_does_not_end_the_run(self):
+        with tempfile.TemporaryDirectory() as d:
+            sna, sym = build_snapshot(d)
+            h = lambda n: f"0x{sym[n]:04x}"  # noqa: E731
+            plans = {h("PRINT"): [[("document_routine", {"addr": h("PRINT"), "name": "print_string", "summary": "x"})], [("finish_routine", {})], [("finish_routine", {})]],
+                     h("START"): [[("document_routine", {"addr": h("START"), "name": "show_demo", "summary": "y"})], [("finish_routine", {})], [("finish_routine", {})]]}
+            mock = MockOllama(plans, crash_on_address=h("DRAW8"))        # the server dies on this routine only
+            host = mock.start()
+            try:
+                out = os.path.join(d, "out.asm")
+                code, printed = OrchestratorTest("run_main").run_main(["--sna", sna, "--host", host, "--model", "mock", "--out", out, "--max-turns", "6",
+                                                                       "--z80tool", Z80TOOL])
+            finally:
+                mock.stop()
+            self.assertEqual(code, 0, printed)
+            self.assertIn(f"model error on 0x{sym['DRAW8']:04X}", printed)
+            self.assertIn("skipping this routine (1 in a row)", printed)
+            self.assertIn("pass 1: 2 routines finished, 0 partial (documented, not finished), 1 failed", printed)   # the others were done
+            self.assertIn("print_string:", read_text(out))
+            self.assertIn("VERIFIED", printed)
+
+    def test_a_dead_server_ends_the_run_after_three_routines_in_a_row(self):
+        with tempfile.TemporaryDirectory() as d:
+            sna, sym = build_snapshot(d)
+            h = lambda n: f"0x{sym[n]:04x}"  # noqa: E731
+            # the first routine works (so it is not a configuration error), then the server dies for good
+            plans = {h("PRINT"): [[("document_routine", {"addr": h("PRINT"), "name": "print_string", "summary": "x"})], [("finish_routine", {})], [("finish_routine", {})]]}
+
+            class Dying(MockOllama):
+                def respond(self, body):
+                    if self.requests and sum(1 for r in self.requests) >= 3:
+                        raise RuntimeError("boom")   # the handler turns this into a dropped connection
+                    return super().respond(body)
+
+            mock = Dying(plans)
+            host = mock.start()
+            try:
+                # pass 1: routine 1 works, 2 and 3 fail; pass 2 (same dead server): the third failure in a row ends the run
+                code, printed = OrchestratorTest("run_main").run_main(["--sna", sna, "--host", host, "--model", "mock", "--refine-model", "mock",
+                                                                       "--max-turns", "6", "--z80tool", Z80TOOL])
+            finally:
+                mock.stop()
+            self.assertEqual(code, 2, printed)
+            self.assertIn("(2 in a row)", printed)
+            self.assertIn("(3 in a row)", printed)
 
     def test_repeated_failures_get_a_hint(self):
         with tempfile.TemporaryDirectory() as d:

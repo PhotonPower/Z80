@@ -11,18 +11,23 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 
 class MockOllama:
-    def __init__(self, plans, fail_with=None, reject_think=False, truncate_first=0, plans_by_model=None, capabilities_by_model=None):
+    def __init__(self, plans, fail_with=None, reject_think=False, truncate_first=0, plans_by_model=None, capabilities_by_model=None,
+                 invalid_json_first=0, crash_on_address=None):
         self.plans = plans          # {"0x4025": [[("run_routine", {...})], [...]]}
         self.fail_with = fail_with  # HTTP status to answer with instead
         self.reject_think = reject_think        # answer 400 "does not support thinking" when the request has a think parameter
         self.truncate_first = truncate_first    # the first N answers are cut off (done_reason "length", empty content)
         self.plans_by_model = plans_by_model or {}            # {model name: plans}: different "models" behave differently
         self.capabilities_by_model = capabilities_by_model or {}  # {model name: ["vision", "tools", ...]}
+        self.invalid_json_served = 0
+        self.invalid_json_first = invalid_json_first   # the first N chat requests are answered like Ollama does for unparsable tool calls
+        self.crash_on_address = crash_on_address       # requests for this routine address get a server error
         self.requests_by_model = {}
         self.images_by_model = {}
         self.think_values = []
         self.options_seen = []
         self.hints = []
+        self.json_hints = []
         self.requests = []
         self.images_seen = 0
         self.tool_errors = []
@@ -37,6 +42,7 @@ class MockOllama:
         self.think_values.append(body.get("think", "absent"))
         self.options_seen.append(body.get("options", {}))
         self.hints += [x["content"] for x in messages if x["role"] == "user" and "cut off" in x["content"]]
+        self.json_hints += [x["content"] for x in messages if x["role"] == "user" and "not valid JSON" in x["content"]]
         self.system_prompts.add(messages[0]["content"])
         first_user = messages[1]["content"]
         m = re.search(r"ROUTINE_ADDR=(0x[0-9A-Fa-f]+)", first_user)
@@ -87,6 +93,19 @@ class MockOllama:
                     self.send_response(400)
                     self.end_headers()
                     self.wfile.write(b'{"error":"\\"mock\\" does not support thinking"}')
+                    return
+                if outer.invalid_json_first > 0:
+                    outer.invalid_json_first -= 1
+                    outer.invalid_json_served += 1
+                    data = b'{"error":"invalid character \'x\' after object key:value pair"}'
+                    self.send_response(500)
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
+                if outer.crash_on_address and "ROUTINE_ADDR=" + outer.crash_on_address in body["messages"][1]["content"].lower().replace("routine_addr", "ROUTINE_ADDR"):
+                    self.send_response(500)
+                    self.end_headers()
+                    self.wfile.write(b'{"error":"model runner has unexpectedly stopped"}')
                     return
                 if outer.fail_with:
                     self.send_response(outer.fail_with)
