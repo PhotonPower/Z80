@@ -189,7 +189,7 @@ class OrchestratorTest(unittest.TestCase):
                 mock2.stop()
             self.assertEqual(code, 0)
             self.assertEqual(len(mock2.requests), 0)
-            self.assertIn("pass 1: 0 routines finished", printed)
+            self.assertIn("pass 1: 0 routines finished, 0 partial", printed)
 
     def test_model_that_never_finishes_leaves_the_listing_valid(self):
         with tempfile.TemporaryDirectory() as d:
@@ -615,6 +615,27 @@ class HardeningTest(unittest.TestCase):
             self.assertIn("do NOT attribute", out)
         finally:
             server.close()
+
+    def test_turn_limit_after_documenting_is_partial_and_the_model_is_warned(self):
+        with tempfile.TemporaryDirectory() as d:
+            sna, sym = build_snapshot(d)
+            addr = f"0x{sym['PRINT']:04x}"
+            one_by_one = [[("document_routine", {"addr": addr, "name": "print_string", "summary": "Prints text."})]]
+            one_by_one += [[("add_comment", {"addr": addr, "text": f"comment {i}"})] for i in range(10)]   # never finishes
+            mock = MockOllama({addr: one_by_one})
+            host = mock.start()
+            try:
+                code, printed = OrchestratorTest("run_main").run_main(["--sna", sna, "--host", host, "--model", "mock", "--only", addr,
+                                                                       "--max-turns", "6", "--z80tool", Z80TOOL])
+            finally:
+                mock.stop()
+            self.assertEqual(code, 0, printed)
+            self.assertIn("turn limit reached", printed)
+            self.assertIn("counted as partial", printed)
+            self.assertIn("pass 1: 0 routines finished, 1 partial (documented, not finished), 0 failed", printed)
+            self.assertTrue(any("Only 3 rounds are left" in m["content"] for r in mock.requests for m in r["messages"] if m["role"] == "user"),
+                            "the model must be told when only a few rounds remain")
+            self.assertIn("SEVERAL tool calls in ONE reply", mock.requests[0]["messages"][0]["content"])
 
     def test_repeated_failures_get_a_hint(self):
         with tempfile.TemporaryDirectory() as d:

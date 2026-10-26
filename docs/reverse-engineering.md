@@ -114,6 +114,18 @@ python3 agent/z80_annotate.py --sna spiel.sna --entry 0x05DC --project spiel.pro
 - Abbrechen und Fortsetzen geht mit derselben `--project`-Datei weiter: Durchgang 1 überspringt Dokumentiertes,
   Durchgang 2 bewertet alles neu.
 
+### Stufenweise arbeiten
+
+Weil `--project` fortgesetzt wird, lässt sich das auch in Etappen machen: erst nur das schnelle Modell über **alles** laufen lassen
+(`--model qwen3-vl:8b-instruct`, ohne `--refine-model`), dann den Bericht ansehen, dann mit demselben `--project` und
+`--refine-model …` die Lücken schließen. Das Modell soll dabei in **einer** Antwort mehrere Tool-Aufrufe schreiben; vor dem
+Rundenlimit wird es gewarnt, und eine bereits dokumentierte, nur nicht abgeschlossene Routine zählt als „partial“ und wird im
+nächsten Durchgang geprüft.
+
+**Was `gaps left: 0` bedeutet:** Der Bericht misst *Vollständigkeit* (Namen, Kommentare, Dokumentation, Selbsteinschätzung),
+nicht *Richtigkeit*. Kleine Modelle schreiben fast immer `confidence: high`. Wichtige Routinen kannst du deshalb mit
+`--refine-all` (jede dokumentierte Routine wird erneut geprüft) oder von einem größeren Modell gegenlesen lassen.
+
 ## Was im Listing automatisch passiert
 
 - **Firmware**: `CALL &BB5A` → `CALL TXT_OUTPUT`, dazu der `EQU`-Block `TXT_OUTPUT EQU &BB5A`

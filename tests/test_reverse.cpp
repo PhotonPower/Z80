@@ -255,6 +255,26 @@ int main() {
         CHECK_EQ(str(writes[1], "pc"), std::string("0x4007"));   // OUT (&FE),A
     }
 
+    // ---- a routine extends over everything its jumps reach ----
+    {
+        Session s;
+        // entry: conditional jump forward, then an unconditional jump even further; the code in between and behind must belong to it
+        ask(s, R"({"cmd":"asm","source":"ORG &4000\nentry: OR A\nJP NC,far\nJP skip\nfar: INC A\nRET\nskip: DEC A\nRET\nother: NOP\nRET\n"})");
+        ask(s, R"({"cmd":"analyze","entries":["entry","other"]})");
+        const Json r = ask(s, R"({"cmd":"routines","order":"address"})");
+        const auto& list = r.find("routines")->items();
+        CHECK_EQ(list.size(), std::size_t{2});
+        CHECK_EQ(str(list[0], "addr"), std::string("0x4000"));
+        CHECK_EQ(list[0].find("size")->asInt(), std::int64_t{1 + 3 + 3 + 1 + 1 + 1 + 1});  // up to and including the RET behind "skip"
+        CHECK_EQ(str(list[0], "ends_with"), std::string("ret"));
+        CHECK_EQ(list[1].find("size")->asInt(), std::int64_t{2});                          // "other" is separate and short
+        // a backward jump below the entry does not drag the earlier code in
+        Session t;
+        ask(t, R"({"cmd":"asm","source":"ORG &5000\nfirst: NOP\nsecond: NOP\nJP second\n"})");
+        ask(t, R"({"cmd":"analyze","entries":["second"]})");
+        CHECK_EQ(ask(t, R"({"cmd":"routines"})").find("routines")->items()[0].find("size")->asInt(), std::int64_t{4});
+    }
+
     // ---- files: annotations, snapshot, ROMs ----
     {
         const auto dir = std::filesystem::temp_directory_path();

@@ -30,6 +30,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from collections import Counter
 
 # --------------------------------------------------------------------------------------------
 # talking to the emulator
@@ -590,6 +591,10 @@ C = low byte), not just C. So `LD BC,GATE_ARRAY+&8C` / `OUT (C),C` writes the va
 on the OUT line already tells you what that does; trust it. `LD B,HIGH(GATE_ARRAY)` / `OUT (C),A` writes A to the Gate Array. Addresses written
 `&1234` are hexadecimal.
 
+Amstrad CPC screen modes: mode 0 = 160x200 pixels with 16 colours, mode 1 = 320x200 with 4 colours, mode 2 = 640x200 with 2 colours (the text
+grid is 20, 40 or 80 columns by 25 rows). `LD IY,&AB28` (or IX) loads the BASE ADDRESS of a record or table; &AB28 is its first field, not a pointer
+variable - name it as a table/record (size = its extent) and name the fields you recognise, e.g. `(IY+8)` = base+8.
+
 More facts: the stack grows DOWNWARDS, so `LD SP,&C000` puts the stack in the RAM just below the screen memory (it does not use the
 screen). With interrupt mode 1 every interrupt jumps to &0038; `LD A,&C3` / `LD (&0038),A` / `LD HL,x` / `LD (&0039),HL` installs `JP x` there,
 i.e. an interrupt handler at x. Registers such as IY often point to a table of game variables; name fields you can identify, e.g. `(IY+8)`.
@@ -597,6 +602,9 @@ i.e. an interrupt handler at x. Registers such as IY often point to a table of g
 Do not finish early. Before finish_routine: give EVERY label a name (loops, branch targets still called loc_/sub_/data_), name every memory
 location the code uses (name_variable, with a comment on its meaning), mark tables and strings (mark_data) and add a short comment (add_comment)
 to every non-obvious step. finish_routine checks this once and tells you what is missing.
+
+Efficiency: you may and should make SEVERAL tool calls in ONE reply (for example all name_variable and add_comment calls together, then
+finish_routine). Every reply costs time, and you only have a limited number of replies per routine.
 
 Be brief. Do not re-derive Z80 basics and do not repeat yourself. Your FIRST reply must already be a tool call (usually run_routine). Prefer
 testing over long reasoning: a run tells you more than a page of thinking.
@@ -707,6 +715,9 @@ class Annotator:
         repeats = {}
         try:
             for turn in range(self.max_turns):
+                if self.max_turns >= 6 and turn == self.max_turns - 3:
+                    messages.append({"role": "user", "content": "Only 3 rounds are left for this routine. In your next reply call ALL remaining annotation tools "
+                                                                "together (several tool calls in one reply are fine) and finish_routine."})
                 compact_messages(messages, max_chars=self.a.num_ctx * 3)
                 resp = self.llm.chat(messages, TOOLS)
                 msg = resp.get("message", {})
@@ -758,6 +769,10 @@ class Annotator:
                 if t.finished:
                     return True
             self.say(f'  turn limit reached for {r["addr"]}')
+            still_open = {x["addr"].lower() for x in self.s.ok(cmd="routines", undocumented_only=True)["routines"]}
+            if r["addr"].lower() not in still_open:
+                self.say("  (the routine is documented, only finish_routine was missing: counted as partial; a refinement pass will check it)")
+                return "partial"
             return False
         finally:
             t.current = None
@@ -781,7 +796,7 @@ class Annotator:
 
     # ---- passes ----
     def explore_pass(self):
-        s, done, failed, tried = self.s, 0, 0, set()
+        s, done, failed, tried = self.s, Counter(), 0, set()
         for round_ in range(3):  # documenting a routine can reveal that others are still open
             routines = self.only_filter(s.ok(cmd="routines", undocumented_only=True)["routines"])
             routines = [r for r in routines if r["addr"] not in tried]
@@ -790,14 +805,12 @@ class Annotator:
             tried |= {r["addr"] for r in routines}
             for i, r in enumerate(routines, 1):
                 self.say(f'[{i}/{len(routines)}] {r["name"]} at {r["addr"]} ({r["size"]} bytes)')
-                ok = self.process_routine(r)
-                done += ok
-                failed += not ok
+                done[self.process_routine(r)] += 1
                 self.save()
-        return done, failed
+        return done
 
     def refine_pass(self):
-        s, done, failed = self.s, 0, 0
+        s, done = self.s, Counter()
         routines = self.only_filter(s.ok(cmd="routines")["routines"])
         todo = []
         for r in routines:
@@ -807,11 +820,9 @@ class Annotator:
         self.say(f"{len(todo)} of {len(routines)} routines have gaps")
         for i, (r, gaps) in enumerate(todo, 1):
             self.say(f'[{i}/{len(todo)}] {r["name"]} at {r["addr"]}: ' + "; ".join(g.split(" (")[0] for g in gaps)[:140])
-            ok = self.process_routine(r, gaps)
-            done += ok
-            failed += not ok
+            done[self.process_routine(r, gaps)] += 1
             self.save()
-        return done, failed
+        return done
 
     def save(self):
         if self.a.project:
@@ -843,8 +854,8 @@ class Annotator:
             self.say(f'== pass {n}/{len(self.passes)} ({self.mode}): model {self.llm.model}'
                      + ("" if self.llm.vision else ", no vision: screenshots are replaced by text summaries")
                      + (", thinking" if self.llm.think else "") + " ==")
-            done, failed = self.explore_pass() if self.mode == "explore" else self.refine_pass()
-            self.say(f"pass {n}: {done} routines finished, {failed} not finished")
+            result = self.explore_pass() if self.mode == "explore" else self.refine_pass()
+            self.say(f"pass {n}: {result[True]} routines finished, {result['partial']} partial (documented, not finished), {result[False]} failed")
         listing = s.ok(cmd="listing", verify=True, max_chars=10_000_000)
         if self.a.out:
             with open(self.a.out, "w", encoding="utf-8") as f:
@@ -913,7 +924,7 @@ def main(argv=None):
     p.add_argument("--max-tokens", type=int, default=4096, help="limit for ONE model answer (with --think true use more, e.g. 12000)")
     p.add_argument("--temperature", type=float, default=0.7, help="do not go low: Qwen models repeat themselves endlessly at low temperature")
     p.add_argument("--lang", default="English", help='language of summaries and comments, e.g. "German"')
-    p.add_argument("--max-turns", type=int, default=20, help="tool-call rounds per routine")
+    p.add_argument("--max-turns", type=int, default=20, help="model replies per routine (several tool calls fit in one reply)")
     p.add_argument("--log", help="write every model message and tool result to this JSON-lines file")
     p.add_argument("--z80tool", help="path to the z80tool executable")
     a = p.parse_args(argv)

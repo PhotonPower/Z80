@@ -198,18 +198,30 @@ Json Session::Impl::cmdRoutines() {
 
     std::map<Word, Info> infos;
     for (Word entry : entries) {
+        // A routine is everything its jumps can reach (CALLs lead to other routines, backward jumps below the entry
+        // belong to someone else): a main loop with scattered branches is one routine, not just its first stretch.
         Info info;
         info.address = entry;
-        Word a = entry;
-        for (int guard = 0; guard < 4096 && dis.isInstructionStart(a); ++guard) {
-            const Instruction ins = decode(s.memory_, a, {});
-            info.size += ins.length;
-            if ((ins.flow == FlowKind::Call || ins.flow == FlowKind::ConditionalCall) && ins.target) info.callees.insert(*ins.target);
-            if (ins.flow == FlowKind::Return) { info.end = "ret"; break; }
-            if (ins.flow == FlowKind::Jump) { info.end = "jump"; break; }
-            if (ins.flow == FlowKind::JumpIndirect) { info.end = "jump_indirect"; break; }
-            a = ins.next();
+        std::set<Word> seen;
+        std::vector<Word> work{entry};
+        unsigned maxEnd = entry;
+        bool sawReturn = false, sawIndirect = false;
+        while (!work.empty() && seen.size() < 4096) {
+            Word a = work.back();
+            work.pop_back();
+            while (a >= entry && dis.isInstructionStart(a) && seen.insert(a).second && seen.size() < 4096) {
+                const Instruction ins = decode(s.memory_, a, {});
+                maxEnd = std::max<unsigned>(maxEnd, static_cast<unsigned>(a) + ins.length);
+                if ((ins.flow == FlowKind::Call || ins.flow == FlowKind::ConditionalCall) && ins.target) info.callees.insert(*ins.target);
+                if ((ins.flow == FlowKind::Jump || ins.flow == FlowKind::ConditionalJump) && ins.target && *ins.target >= entry) work.push_back(*ins.target);
+                if (ins.flow == FlowKind::Return) { sawReturn = true; break; }
+                if (ins.flow == FlowKind::Jump) break;
+                if (ins.flow == FlowKind::JumpIndirect) { sawIndirect = true; break; }
+                a = ins.next();
+            }
         }
+        info.size = std::min<unsigned>(maxEnd, 0x10000u) - entry;
+        info.end = sawReturn ? "ret" : (sawIndirect ? "jump_indirect" : "jump");
         infos[entry] = std::move(info);
     }
 

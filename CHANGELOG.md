@@ -7,6 +7,10 @@ die Versionierung an [Semantic Versioning](https://semver.org/lang/de/).
 ## [Unreleased]
 
 ### Behoben
+- Die Ausdehnung einer Routine endete am ersten unbedingten Sprung: bei einer Hauptschleife sah das Modell nur den ersten Teil
+  (137 von etwa 250 Bytes). Sie umfasst jetzt alles, was die Sprünge erreichen (Aufrufe ausgenommen).
+- Orchestrator: Rundenlimit trotz fast fertiger Arbeit zählte als Fehlschlag; jetzt „partial“, Warnung vor den letzten Runden,
+  Hinweis, mehrere Tool-Aufrufe je Antwort zu schreiben; Prompt-Fakten zu CPC-Bildschirmmodi und Tabellen-Basisadressen.
 - Kommentare an Adressen mitten in Befehlen wurden stillschweigend verworfen: das Modell-Listing hat jetzt eine Adressspalte,
   `ann_comment` lehnt solche Adressen mit Erklärung ab, `ann_data` lehnt Bereiche über Code ab.
 - Ein Benutzerkommentar verdeckte die automatische Hardware-Erklärung; beide werden jetzt gezeigt.
