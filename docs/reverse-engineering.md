@@ -86,6 +86,34 @@ Undokumentiertes aufruft), je Routine eine eigene Unterhaltung mit dem Listing, 
 dokumentierten Aufgerufenen und den Werkzeugen → Annotationen speichern → am Ende das verifizierte Listing.
 Eine zweite Ausführung mit demselben `--project` fragt das Modell nur noch nach noch offenen Routinen.
 
+## Mehrere Durchgänge: schnell zuerst, gründlich für die Lücken
+
+Ein Thinking-Modell braucht je Antwort Minuten; für das Standardmäßige ist ein Instruct-Modell viel schneller. Deshalb
+lassen sich **mehrere Modelle nacheinander** einsetzen:
+
+```sh
+python3 agent/z80_annotate.py --sna spiel.sna --entry 0x05DC --project spiel.proj.json --out spiel.asm \
+        --lang Deutsch --report spiel_luecken.md \
+        --model qwen3-vl:8b-instruct --max-turns 12 \
+        --refine-model qwen3-vl:8b --refine-max-turns 25 --refine-max-tokens 12000
+```
+
+- **Durchgang 1** (`--model`): das schnelle Modell arbeitet alle Routinen von unten nach oben ab.
+- **Lücken werden gemessen, nicht geschätzt**: nicht dokumentiert, Labels noch `loc_…`/`sub_…`, Speicherstellen ohne Namen,
+  zu wenige Kommentare, oder das Modell hat seine Dokumentation selbst als **`confidence: low`** markiert
+  (`document_routine` hat dafür ein Feld; im Listing erscheint „confidence: low – a guess, please verify“).
+- **Durchgang 2, 3, …** (`--refine-model`, beliebig oft): jedes Modell bekommt **nur die Routinen mit Lücken**, sieht die
+  Annotationen des Vorgängers als Hypothesen eines Kollegen, soll sie durch Ausführen **prüfen, korrigieren (überschreiben)
+  und ergänzen** und die Lücken schließen. Vollständige Routinen werden nicht erneut angefasst (`--refine-all` prüft trotzdem
+  alle, `--refine-medium` nimmt auch „medium“ mit).
+- **Fähigkeiten erkennt der Orchestrator selbst** (Ollama `/api/show`): ein Modell ohne Tool-Unterstützung wird sofort
+  abgelehnt; eines ohne Vision bekommt statt Screenshots nur die Textzusammenfassung (so lassen sich auch reine
+  Textmodelle als Prüfer einsetzen); Thinking wird in Refine-Durchgängen eingeschaltet, wenn das Modell es kann
+  (`--refine-think`, `--refine-max-tokens`).
+- **`--report`** schreibt am Ende, was trotz allem offen blieb (je Routine die Gründe), damit du gezielt nachsehen kannst.
+- Abbrechen und Fortsetzen geht mit derselben `--project`-Datei weiter: Durchgang 1 überspringt Dokumentiertes,
+  Durchgang 2 bewertet alles neu.
+
 ## Was im Listing automatisch passiert
 
 - **Firmware**: `CALL &BB5A` → `CALL TXT_OUTPUT`, dazu der `EQU`-Block `TXT_OUTPUT EQU &BB5A`

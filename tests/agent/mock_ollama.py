@@ -11,11 +11,15 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 
 class MockOllama:
-    def __init__(self, plans, fail_with=None, reject_think=False, truncate_first=0):
+    def __init__(self, plans, fail_with=None, reject_think=False, truncate_first=0, plans_by_model=None, capabilities_by_model=None):
         self.plans = plans          # {"0x4025": [[("run_routine", {...})], [...]]}
         self.fail_with = fail_with  # HTTP status to answer with instead
         self.reject_think = reject_think        # answer 400 "does not support thinking" when the request has a think parameter
         self.truncate_first = truncate_first    # the first N answers are cut off (done_reason "length", empty content)
+        self.plans_by_model = plans_by_model or {}            # {model name: plans}: different "models" behave differently
+        self.capabilities_by_model = capabilities_by_model or {}  # {model name: ["vision", "tools", ...]}
+        self.requests_by_model = {}
+        self.images_by_model = {}
         self.think_values = []
         self.options_seen = []
         self.hints = []
@@ -45,7 +49,10 @@ class MockOllama:
                 self.tool_results.append(x["content"])
                 if x["content"].startswith("error"):
                     self.tool_errors.append(x["content"])
-        plan = self.plans.get(addr, [])
+        model = body.get("model")
+        self.requests_by_model.setdefault(model, []).append(first_user)
+        self.images_by_model[model] = max(self.images_by_model.get(model, 0), len(images))
+        plan = self.plans_by_model.get(model, self.plans).get(addr, [])
         if turn >= len(plan):
             return {"role": "assistant", "content": "I am done."}
         entry = plan[turn]
@@ -66,6 +73,15 @@ class MockOllama:
             def do_POST(self):  # noqa: N802
                 length = int(self.headers.get("Content-Length", 0))
                 body = json.loads(self.rfile.read(length))
+                if self.path.endswith("/api/show"):  # what can this model do?
+                    caps = outer.capabilities_by_model.get(body.get("model"), ["completion", "vision", "tools"])
+                    data = json.dumps({"capabilities": caps}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
                 if outer.reject_think and "think" in body:
                     outer.think_values.append("rejected")
                     self.send_response(400)

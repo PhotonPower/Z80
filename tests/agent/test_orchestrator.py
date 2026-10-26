@@ -189,7 +189,7 @@ class OrchestratorTest(unittest.TestCase):
                 mock2.stop()
             self.assertEqual(code, 0)
             self.assertEqual(len(mock2.requests), 0)
-            self.assertIn("0 routines documented", printed)
+            self.assertIn("pass 1: 0 routines finished", printed)
 
     def test_model_that_never_finishes_leaves_the_listing_valid(self):
         with tempfile.TemporaryDirectory() as d:
@@ -415,7 +415,7 @@ class HardeningTest(unittest.TestCase):
             self.assertEqual(limits[:3], [4096, 6144, 9216])      # every cut-off gives the next answer more room
             self.assertIn("thinks even with --think false", printed)  # the truncated mock answers carry a "thinking" field
             self.assertTrue(mock.hints, "the model must be told that its answer was cut off")
-            self.assertIn("1 routines documented", printed)   # and it recovered
+            self.assertIn("pass 1: 1 routines finished", printed)   # and it recovered
 
     def test_finish_is_checked_once_for_completeness(self):
         with tempfile.TemporaryDirectory() as d:
@@ -438,7 +438,7 @@ class HardeningTest(unittest.TestCase):
             finally:
                 mock.stop()
             self.assertEqual(code, 0, printed)
-            self.assertIn("1 routines documented", printed)
+            self.assertIn("pass 1: 1 routines finished", printed)
             warning = next(r for r in mock.tool_results if r.startswith("not finished yet"))
             self.assertIn(f"loc_{sym['D1']:04x}", warning)     # names the label that is still automatic
             self.assertIn("comment(s) for", warning)
@@ -459,7 +459,7 @@ class HardeningTest(unittest.TestCase):
                                                                        "--max-turns", "5", "--z80tool", Z80TOOL])
             finally:
                 mock.stop()
-            self.assertIn("1 routines documented", printed)    # the model is never trapped by the check
+            self.assertIn("pass 1: 1 routines finished", printed)    # the model is never trapped by the check
 
     def test_outdated_z80tool_is_detected(self):
         class OldServer:
@@ -481,6 +481,99 @@ class HardeningTest(unittest.TestCase):
             annotate.check_server(server)
         finally:
             server.close()
+
+    def test_two_passes_fast_model_then_thinking_model_for_the_gaps(self):
+        with tempfile.TemporaryDirectory() as d:
+            sna, sym = build_snapshot(d)
+            h = lambda n: f"0x{sym[n]:04x}"  # noqa: E731
+            msg, sprite, counter = f"0x{sym['MSG']:04X}", f"0x{sym['SPRITE']:04X}", f"0x{sym['COUNTER']:04X}"
+            fast = {   # pass 1: finishes START completely, leaves PRINT without comments, marks DRAW8 as a guess
+                h("PRINT"): [[("document_routine", {"addr": h("PRINT"), "name": "print_string", "summary": "Prints text.", "confidence": "high"})],
+                             [("finish_routine", {})], [("finish_routine", {})]],
+                h("DRAW8"): [[("name_label", {"addr": h("D1"), "name": "row_loop"}),
+                              ("add_comment", {"addr": h("D1"), "text": "one row per pass"}),
+                              ("add_comment", {"addr": h("DRAW8"), "text": "eight rows"}),
+                              ("document_routine", {"addr": h("DRAW8"), "name": "draw_sprite_8x8", "summary": "Probably draws something.", "confidence": "low"})],
+                             [("finish_routine", {})]],
+                h("START"): [[("name_variable", {"addr": counter, "name": "run_counter", "size": 1, "comment": "runs"}),
+                              ("add_comment", {"addr": h("START"), "text": "entry"}), ("add_comment", {"addr": h("START") + "+3" if False else f"0x{sym['START'] + 2:04x}", "text": "set mode"}),
+                              ("document_routine", {"addr": h("START"), "name": "show_greeting_demo", "summary": "Demo.", "confidence": "high"})],
+                             [("finish_routine", {})]],
+            }
+            slow = {   # pass 2: only asked about PRINT (no comments) and DRAW8 (low confidence); has no vision
+                h("PRINT"): [[("add_comment", {"addr": h("PRINT"), "text": "read next character"}),
+                              ("add_comment", {"addr": f"0x{sym['PRINT'] + 3:04x}", "text": "zero terminator ends the text"}),
+                              ("document_routine", {"addr": h("PRINT"), "name": "print_string", "summary": "Prints a zero terminated string.", "confidence": "high"})],
+                             [("finish_routine", {})]],
+                h("DRAW8"): [[("run_routine", {"addr": h("DRAW8"), "registers": {"HL": sprite, "DE": "0xC78A"}, "screenshot": True})],
+                             [("document_routine", {"addr": h("DRAW8"), "name": "draw_sprite_8x8", "summary": "Copies 8 bytes to 8 screen lines (refined).",
+                                                    "confidence": "high"})],
+                             [("finish_routine", {})]],
+            }
+            mock = MockOllama({}, plans_by_model={"fast": fast, "slow": slow},
+                              capabilities_by_model={"fast": ["completion", "vision", "tools"], "slow": ["completion", "tools", "thinking"]})
+            host = mock.start()
+            try:
+                out, project, report = (os.path.join(d, n) for n in ("out.asm", "proj.json", "report.md"))
+                code, printed = OrchestratorTest("run_main").run_main(["--sna", sna, "--host", host, "--model", "fast", "--refine-model", "slow",
+                                                                       "--project", project, "--out", out, "--report", report,
+                                                                       "--max-turns", "6", "--refine-max-turns", "6", "--z80tool", Z80TOOL])
+            finally:
+                mock.stop()
+            self.assertEqual(code, 0, printed)
+            self.assertIn("== pass 1/2 (explore): model fast", printed)
+            self.assertIn("== pass 2/2 (refine): model slow, no vision", printed)
+            self.assertIn(", thinking ==", printed)                                  # thinking was switched on for the capable model
+            self.assertIn("2 of 3 routines have gaps", printed)
+            asked = lambda model: {a.split()[0].split("=")[1].lower() for a in (m.split("\n")[0] for m in mock.requests_by_model[model])}  # noqa: E731
+            self.assertEqual(asked("fast"), {h("PRINT"), h("DRAW8"), h("START")})
+            self.assertEqual(asked("slow"), {h("PRINT"), h("DRAW8")})                 # START was complete: not asked again
+            self.assertEqual(mock.images_by_model.get("slow", 0), 0)                 # no vision: nothing was sent
+            self.assertTrue(any("NOT shown: you cannot see images" in r for r in mock.tool_results), mock.tool_results)
+            self.assertGreaterEqual(mock.think_values.count(True), 1)                # the refine model was asked to think
+            self.assertIn("gaps left: 0 of 3 routines", printed)
+            self.assertIn("VERIFIED", printed)
+            text = read_text(out)
+            self.assertIn("(refined)", text)                                           # the second model's text replaced the first one's
+            self.assertNotIn("Probably draws something", text)
+            self.assertNotIn("confidence: low", text)                                  # and its confidence replaced "low"
+            self.assertIn("; zero terminator ends the text", text)
+            proj = json.loads(read_text(project))
+            self.assertEqual({r["name"]: r.get("confidence") for r in proj["routines"]}, {"print_string": "high", "draw_sprite_8x8": "high", "show_greeting_demo": "high"})
+            self.assertIn("0 with gaps", read_text(report))
+
+    def test_remaining_gaps_are_reported(self):
+        with tempfile.TemporaryDirectory() as d:
+            sna, sym = build_snapshot(d)
+            addr = f"0x{sym['PRINT']:04x}"
+            plans = {addr: [[("document_routine", {"addr": addr, "name": "print_string", "summary": "guess", "confidence": "low"})],
+                            [("finish_routine", {})], [("finish_routine", {})]]}
+            mock = MockOllama(plans)
+            host = mock.start()
+            try:
+                report = os.path.join(d, "gaps.md")
+                code, printed = OrchestratorTest("run_main").run_main(["--sna", sna, "--host", host, "--model", "mock", "--only", addr,
+                                                                       "--max-turns", "5", "--report", report, "--z80tool", Z80TOOL])
+            finally:
+                mock.stop()
+            self.assertEqual(code, 0, printed)
+            self.assertIn("gaps left: 1 of 1 routines (1 with low confidence)", printed)
+            md = read_text(report)
+            self.assertIn("print_string", md)
+            self.assertIn("confidence: low", md)
+            self.assertIn("comment(s) for", md)
+
+    def test_model_without_tool_support_is_refused_early(self):
+        with tempfile.TemporaryDirectory() as d:
+            sna, _ = build_snapshot(d)
+            mock = MockOllama({}, capabilities_by_model={"plain": ["completion"]})
+            host = mock.start()
+            try:
+                code, _ = OrchestratorTest("run_main").run_main(["--sna", sna, "--host", host, "--model", "plain", "--z80tool", Z80TOOL])
+            finally:
+                mock.stop()
+            self.assertEqual(code, 2)
+            self.assertEqual(mock.requests, [])                                       # no chat request was made
 
     def test_repeated_failures_get_a_hint(self):
         with tempfile.TemporaryDirectory() as d:

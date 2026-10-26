@@ -105,6 +105,9 @@ std::optional<std::string> Annotations::claimName(Word address, const std::strin
 std::optional<std::string> Annotations::setLabel(Word address, const std::string& name) { return claimName(address, name); }
 
 std::optional<std::string> Annotations::setRoutine(Word address, const RoutineDoc& doc) {
+    if (!doc.confidence.empty() && doc.confidence != "high" && doc.confidence != "medium" && doc.confidence != "low") {
+        return "confidence must be high, medium or low";
+    }
     if (auto err = claimName(address, doc.name)) return err;
     routines_[address] = doc;
     return std::nullopt;
@@ -199,6 +202,7 @@ Json Annotations::toJson() const {
     for (const auto& [a, r] : routines_) {
         Json e = Json::object();
         e.set("address", hex4(a)).set("name", r.name).set("summary", r.summary).set("inputs", r.inputs).set("outputs", r.outputs).set("clobbers", r.clobbers);
+        if (!r.confidence.empty()) e.set("confidence", r.confidence);
         routines.push(std::move(e));
     }
     j.set("routines", routines);
@@ -237,7 +241,7 @@ Annotations Annotations::fromJson(const Json& j) {
     }
     if (const Json* routines = j.find("routines"); routines && routines->isArray()) {
         for (const Json& e : routines->items()) {
-            RoutineDoc d{strOr(e, "name"), strOr(e, "summary"), strOr(e, "inputs"), strOr(e, "outputs"), strOr(e, "clobbers")};
+            RoutineDoc d{strOr(e, "name"), strOr(e, "summary"), strOr(e, "inputs"), strOr(e, "outputs"), strOr(e, "clobbers"), strOr(e, "confidence")};
             check(a.setRoutine(parseAddress(*e.find("address"), "routine"), d));
         }
     }

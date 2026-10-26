@@ -7,6 +7,9 @@ die Versionierung an [Semantic Versioning](https://semver.org/lang/de/).
 ## [Unreleased]
 
 ### Hinzugefügt
+- **Mehrere Durchgänge** im Orchestrator (`--refine-model`, `--report`, …): schnelles Modell zuerst, weitere Modelle
+  prüfen und ergänzen nur Routinen mit gemessenen Lücken; Fähigkeitserkennung über Ollama `/api/show`
+  (Tools, Vision, Thinking); `confidence`-Feld (high/medium/low) in der Routinendokumentation.
 - Listing: Erklärung von Idiomen (`LD SP,nn`, Interrupt-Vektor-Installation, `HALT`, `IM`), Zähler `user_comments`.
 - Orchestrator: einmalige Vollständigkeitsprüfung vor `finish_routine`; `run_routine` fasst Änderungen im
   Bildschirmspeicher zusammen und erklärt, dass ein nicht zurückkehrender Einstiegspunkt normal ist.

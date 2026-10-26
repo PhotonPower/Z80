@@ -92,6 +92,19 @@ class Ollama:
         self.options = {"num_ctx": num_ctx, "temperature": temperature, "top_p": 0.8, "top_k": 20, "presence_penalty": 1.0,
                         "num_predict": max_tokens}
 
+    vision = True  # set from capabilities(): False means screenshots cannot be shown to this model
+
+    def capabilities(self):
+        """What Ollama says the model can do (e.g. {"completion", "vision", "tools", "thinking"}), or None if unknown."""
+        try:
+            req = urllib.request.Request(self.url.rsplit("/api/", 1)[0] + "/api/show", data=json.dumps({"model": self.model}).encode(),
+                                         headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                caps = json.loads(resp.read()).get("capabilities")
+            return set(caps) if isinstance(caps, list) else None
+        except Exception:  # noqa: BLE001  (older Ollama versions, unreachable server: assume the model is fine)
+            return None
+
     def chat(self, messages, tools):
         body = {"model": self.model, "messages": messages, "tools": tools, "stream": False, "options": self.options}
         if self.think is not None:
@@ -169,7 +182,9 @@ TOOLS = [
          "summary": {"type": "string", "description": "what it does, 1-3 sentences"},
          "inputs": {"type": "string", "description": 'registers/memory read, e.g. "HL = source, DE = screen address"'},
          "outputs": {"type": "string", "description": "results and return values"},
-         "clobbers": {"type": "string", "description": 'registers destroyed, e.g. "AF BC"'}},
+         "clobbers": {"type": "string", "description": 'registers destroyed, e.g. "AF BC"'},
+         "confidence": {"type": "string", "enum": ["high", "medium", "low"],
+                        "description": "how sure you are: high = verified by running it, medium = plausible from the code, low = a guess"}},
         ["addr", "name", "summary"]),
     _fn("name_variable", "Name a memory location the code reads/writes (variable, flag, pointer, buffer, table).",
         {"addr": ADDR, "name": {"type": "string"}, "size": {"type": "integer", "description": "bytes, default 1"},
@@ -341,6 +356,7 @@ class Tools:
     def __init__(self, server, irq=0):
         self.s = server
         self.irq = irq
+        self.vision = True
         self.images = []           # base64 PNGs waiting to be shown to the model
         self.finished = False
 
@@ -452,7 +468,10 @@ class Tools:
             else:
                 shot = s.ok(cmd="screen", name="_after")
                 out.append("(image attached: full screen)")
-            self.images.append(shot["png_base64"])
+            if self.vision:
+                self.images.append(shot["png_base64"])
+            else:
+                out[-1] += "  [NOT shown: you cannot see images; use the text summary above]"
         if not keep_state:
             s.ok(cmd="rollback", name="baseline")
         else:
@@ -466,6 +485,8 @@ class Tools:
         if zoom:
             req["zoom"] = int(zoom)
         shot = self.s.ok(**req)
+        if not self.vision:
+            return "(you cannot see images: this model has no vision; rely on the text summaries from run_routine)"
         self.images.append(shot["png_base64"])
         return f'(image attached: {shot["width"]}x{shot["height"]} px, screen mode {shot["mode"]})'
 
@@ -478,9 +499,9 @@ class Tools:
         self.s.ok(cmd="ann_label", addr=norm_addr(addr), name=name)
         return f"ok: {name}"
 
-    def t_document_routine(self, addr, name, summary, inputs="", outputs="", clobbers=""):
+    def t_document_routine(self, addr, name, summary, inputs="", outputs="", clobbers="", confidence=""):
         a = norm_addr(addr)
-        self.s.ok(cmd="ann_routine", addr=a, name=name, summary=summary, inputs=inputs, outputs=outputs, clobbers=clobbers)
+        self.s.ok(cmd="ann_routine", addr=a, name=name, summary=summary, inputs=inputs, outputs=outputs, clobbers=clobbers, confidence=confidence)
         return f"ok: routine {name} documented"
 
     def t_name_variable(self, addr, name, size=1, comment=""):
@@ -495,11 +516,12 @@ class Tools:
         self.s.ok(cmd="ann_comment", addr=norm_addr(addr), text=text, block=bool(block))
         return "ok"
 
-    def completeness_problems(self):
-        """What is still missing in the current routine's listing (names, comments)."""
-        if not self.range:
+    def completeness_problems(self, rng=None):
+        """What is still missing in a routine's listing (names, comments); default: the routine being processed."""
+        rng = rng or self.range
+        if not rng:
             return []
-        r = self.s.ok(cmd="listing", verify=False, max_chars=200000, **{"from": self.range[0], "to": self.range[1]})
+        r = self.s.ok(cmd="listing", verify=False, max_chars=200000, **{"from": rng[0], "to": rng[1]})
         text = r["text"]
         problems = []
         unnamed = re.findall(r"^((?:loc|sub|data)_[0-9a-f]{4}):", text, re.M)
@@ -572,14 +594,28 @@ variables are nouns (player_x, lives_left), flags end in a state (sound_enabled)
 names. Comments explain WHY and meaning, not what the instruction obviously does; keep them short. Mention units (pixels, bytes,
 characters) and valid ranges when you know them. If you are not sure, say so in the comment ("probably ...") instead of inventing details.
 Screenshots show the CPC screen scaled to 640 pixels width; the "text cells" in tool results are 80 columns x 25 rows.
+Set `confidence` in document_routine honestly: high only if a test you ran confirms it, medium if it is plausible from the code, low if it is
+a guess. Another model may check your low/medium routines later - that is fine, a clear "low" is more useful than a confident mistake.
 Write all summaries and comments in {lang}.
+"""
+
+REFINE_PROMPT = """
+THIS IS A REFINEMENT PASS. A faster model has already annotated this routine; its names, comments and documentation appear in the listing.
+Treat them as hypotheses of a colleague, not as facts: verify the important claims by running the routine, correct what is wrong (calling
+document_routine, name_label, name_variable or add_comment again for the same address overwrites the old text) and close the gaps listed in
+the task. Do not rewrite things that are already right. Set `confidence` to high only for what you verified.
 """
 
 
 class Annotator:
-    def __init__(self, server, ollama, args, log=None):
-        self.s, self.llm, self.a, self.log = server, ollama, args, log
-        self.tools = Tools(server, irq=getattr(args, 'irq', 0))
+    """Runs one or more passes over the program. Pass 1 explores; later passes refine routines that still have gaps."""
+
+    def __init__(self, server, passes, args, log=None):
+        self.s, self.passes, self.a, self.log = server, passes, args, log
+        self.llm = passes[0]["llm"]
+        self.max_turns = args.max_turns
+        self.mode = "explore"
+        self.tools = Tools(server, irq=getattr(args, "irq", 0))
 
     said_thinking = False
 
@@ -620,7 +656,7 @@ class Annotator:
         s.ok(cmd="checkpoint", name="baseline")
 
     # ---- one routine ----
-    def routine_prompt(self, r):
+    def routine_prompt(self, r, gaps=None):
         addr = r["addr"]
         end = f'0x{int(addr, 16) + max(r["size"], 1) - 1:04X}'
         listing = self.s.ok(cmd="listing", verify=False, max_chars=14000, **{"from": addr, "to": end})
@@ -637,20 +673,28 @@ class Annotator:
                 f'Called from: {callers}\nCalls:\n' + ("\n".join(callees) if callees else "  nothing") +
                 f"\n\nListing:\n```\n{listing['text']}\n```\n{'[listing truncated; use get_listing for the rest]' if listing.get('truncated') else ''}\n"
                 "Analyse this routine, test it, annotate it and call finish_routine.")
+        if gaps:
+            text += ("\n\nKnown gaps to close in this pass:\n- " + "\n- ".join(gaps) +
+                     "\nVerify the existing documentation as well, and lower or raise its confidence accordingly.")
         return text
 
-    def process_routine(self, r):
+    def process_routine(self, r, gaps=None):
         t = self.tools
         t.reset_routine()
         t.current = r["addr"]
         t.range = (r["addr"], f'0x{int(r["addr"], 16) + max(r["size"], 1) - 1:04X}')
-        messages = [{"role": "system", "content": SYSTEM_PROMPT.format(lang=self.a.lang)},
-                    {"role": "user", "content": self.routine_prompt(r)}]
+        system = SYSTEM_PROMPT.format(lang=self.a.lang)
+        if self.mode == "refine":
+            system += REFINE_PROMPT
+        if not self.llm.vision:
+            system += "\nYou cannot see images: screenshots are not shown to you; use the text summaries of screen changes.\n"
+        messages = [{"role": "system", "content": system},
+                    {"role": "user", "content": self.routine_prompt(r, gaps)}]
         nudges = 0
         cut = 0
         repeats = {}
         try:
-            for turn in range(self.a.max_turns):
+            for turn in range(self.max_turns):
                 compact_messages(messages, max_chars=self.a.num_ctx * 3)
                 resp = self.llm.chat(messages, TOOLS)
                 msg = resp.get("message", {})
@@ -706,33 +750,109 @@ class Annotator:
         finally:
             t.current = None
 
-    # ---- everything ----
-    def run(self):
-        s = self.s
-        done = failed = 0
+    # ---- gaps ----
+    def routine_gaps(self, r):
+        """Objective list of what is missing or doubtful about a routine's documentation."""
+        last = f'0x{int(r["addr"], 16) + max(r["size"], 1) - 1:04X}'
+        gaps = [] if r["documented"] else ["the routine is not documented yet (document_routine)"]
+        gaps += self.tools.completeness_problems((r["addr"], last))
+        conf = r.get("confidence", "")
+        if conf == "low" or (conf == "medium" and self.a.refine_medium):
+            gaps.append(f"the previous model marked its own documentation as confidence {conf}: verify it by running the routine")
+        return gaps
+
+    def only_filter(self, routines):
+        if self.a.only:
+            wanted = {x.lower() for x in self.a.only}
+            routines = [r for r in routines if r["addr"].lower() in wanted]
+        return routines
+
+    # ---- passes ----
+    def explore_pass(self):
+        s, done, failed, tried = self.s, 0, 0, set()
         for round_ in range(3):  # documenting a routine can reveal that others are still open
-            routines = s.ok(cmd="routines", undocumented_only=True)["routines"]
-            if self.a.only:
-                routines = [r for r in routines if r["addr"].lower() in {x.lower() for x in self.a.only}]
-            routines = [r for r in routines if r["addr"] not in getattr(self, "_tried", set())]
+            routines = self.only_filter(s.ok(cmd="routines", undocumented_only=True)["routines"])
+            routines = [r for r in routines if r["addr"] not in tried]
             if not routines:
                 break
-            self._tried = getattr(self, "_tried", set()) | {r["addr"] for r in routines}
+            tried |= {r["addr"] for r in routines}
             for i, r in enumerate(routines, 1):
                 self.say(f'[{i}/{len(routines)}] {r["name"]} at {r["addr"]} ({r["size"]} bytes)')
                 ok = self.process_routine(r)
                 done += ok
                 failed += not ok
-                if self.a.project:
-                    s.ok(cmd="ann_save", file=self.a.project)
+                self.save()
+        return done, failed
+
+    def refine_pass(self):
+        s, done, failed = self.s, 0, 0
+        routines = self.only_filter(s.ok(cmd="routines")["routines"])
+        todo = []
+        for r in routines:
+            gaps = self.routine_gaps(r)
+            if gaps or (self.a.refine_all and r["documented"]):
+                todo.append((r, gaps))
+        self.say(f"{len(todo)} of {len(routines)} routines have gaps")
+        for i, (r, gaps) in enumerate(todo, 1):
+            self.say(f'[{i}/{len(todo)}] {r["name"]} at {r["addr"]}: ' + "; ".join(g.split(" (")[0] for g in gaps)[:140])
+            ok = self.process_routine(r, gaps)
+            done += ok
+            failed += not ok
+            self.save()
+        return done, failed
+
+    def save(self):
+        if self.a.project:
+            self.s.ok(cmd="ann_save", file=self.a.project)
+
+    def report(self):
+        """Remaining gaps after all passes (also written to --report)."""
+        routines = self.only_filter(self.s.ok(cmd="routines")["routines"])
+        rows = [(r, self.routine_gaps(r)) for r in routines]
+        open_rows = [(r, g) for r, g in rows if g]
+        low = sum(1 for r, _ in rows if r.get("confidence") == "low")
+        self.say(f"gaps left: {len(open_rows)} of {len(rows)} routines" + (f" ({low} with low confidence)" if low else ""))
+        if self.a.report:
+            lines = [f"# Annotation report", "", f"{len(rows) - len(open_rows)} of {len(rows)} routines complete, {len(open_rows)} with gaps.", ""]
+            for r, g in open_rows:
+                lines.append(f'## {r["name"]} ({r["addr"]}, {r["size"]} bytes, confidence: {r.get("confidence") or "n/a"})')
+                lines += [f"- {x}" for x in g]
+                lines.append("")
+            with open(self.a.report, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines))
+        return len(open_rows)
+
+    def run(self):
+        s = self.s
+        for n, p in enumerate(self.passes, 1):
+            self.llm, self.mode, self.max_turns = p["llm"], p["mode"], p["max_turns"]
+            self.tools.vision = self.llm.vision
+            self.said_thinking = False
+            self.say(f'== pass {n}/{len(self.passes)} ({self.mode}): model {self.llm.model}'
+                     + ("" if self.llm.vision else ", no vision: screenshots are replaced by text summaries")
+                     + (", thinking" if self.llm.think else "") + " ==")
+            done, failed = self.explore_pass() if self.mode == "explore" else self.refine_pass()
+            self.say(f"pass {n}: {done} routines finished, {failed} not finished")
         listing = s.ok(cmd="listing", verify=True, max_chars=10_000_000)
         if self.a.out:
             with open(self.a.out, "w", encoding="utf-8") as f:
                 f.write(listing["text"])
-        self.say(f'finished: {done} routines documented, {failed} left open; listing '
-                 + ("VERIFIED (re-assembles to the identical bytes)" if listing["verified"] else f'NOT verified: {listing["verify_detail"]}')
+        self.report()
+        self.say("listing " + ("VERIFIED (re-assembles to the identical bytes)" if listing["verified"] else f'NOT verified: {listing["verify_detail"]}')
                  + (f" -> {self.a.out}" if self.a.out else ""))
         return listing
+
+
+def make_pass(a, model, mode, think, max_tokens, max_turns):
+    """Creates the Ollama client for one pass and adapts it to what the model can do."""
+    llm = Ollama(a.host, model, think=False, num_ctx=a.num_ctx, temperature=a.temperature, max_tokens=max_tokens)
+    caps = llm.capabilities()
+    if caps is not None:
+        if "tools" not in caps:
+            raise OllamaError(f"model {model} does not support tool calling (capabilities: {', '.join(sorted(caps))})")
+        llm.vision = "vision" in caps
+    llm.think = (caps is not None and "thinking" in caps) if think == "auto" else (think is True or think == "true")
+    return {"llm": llm, "mode": mode, "max_turns": max_turns}
 
 
 def find_z80tool(explicit):
@@ -764,7 +884,16 @@ def main(argv=None):
     p.add_argument("--project", help="annotation file (JSON); loaded if present, saved after every routine")
     p.add_argument("--out", help="write the final annotated listing here")
     p.add_argument("--only", action="append", help="process only this routine address (repeatable)")
-    p.add_argument("--model", default="qwen3-vl:8b", help="Ollama model tag (must support tools and images)")
+    p.add_argument("--model", default="qwen3-vl:8b-instruct", help="Ollama model tag for pass 1 (needs tool support; vision is detected)")
+    p.add_argument("--refine-model", action="append", default=[], metavar="MODEL",
+                   help="model for one more pass that checks and completes routines that still have gaps (repeatable; "
+                        'e.g. the slower thinking model "qwen3-vl:8b"; a text-only model works too, it just gets no images)')
+    p.add_argument("--refine-think", choices=["auto", "true", "false"], default="auto", help="thinking mode in refinement passes (auto: if the model has it)")
+    p.add_argument("--refine-max-tokens", type=int, default=12000, help="answer limit in refinement passes (they may think a lot)")
+    p.add_argument("--refine-max-turns", type=int, default=25, help="tool-call rounds per routine in refinement passes")
+    p.add_argument("--refine-all", action="store_true", help="let the refinement passes review every documented routine, not only those with gaps")
+    p.add_argument("--refine-medium", action="store_true", help="also revisit routines the model itself rated medium confidence")
+    p.add_argument("--report", help="write the remaining gaps (per routine) to this Markdown file")
     p.add_argument("--host", default=os.environ.get("OLLAMA_HOST", "http://localhost:11434"))
     p.add_argument("--think", choices=["true", "false"], default="false",
                    help="the model's thinking mode (default false: tool calling works better and it cannot run away; ignored by models without it)")
@@ -782,8 +911,10 @@ def main(argv=None):
     server = Z80Server(find_z80tool(a.z80tool))
     log = open(a.log, "a", encoding="utf-8") if a.log else None
     try:
-        llm = Ollama(a.host, a.model, think=a.think == "true", num_ctx=a.num_ctx, temperature=a.temperature, max_tokens=a.max_tokens)
-        worker = Annotator(server, llm, a, log)
+        passes = [make_pass(a, a.model, "explore", think=a.think == "true", max_tokens=a.max_tokens, max_turns=a.max_turns)]
+        for model in a.refine_model:
+            passes.append(make_pass(a, model, "refine", think=a.refine_think, max_tokens=a.refine_max_tokens, max_turns=a.refine_max_turns))
+        worker = Annotator(server, passes, a, log)
         worker.setup()
         listing = worker.run()
         return 0 if listing["verified"] else 1

@@ -169,6 +169,10 @@ int main() {
 
         auto annotate = [&](const std::string& json) { return ask(s, json); };
         CHECK(ok(annotate(R"({"cmd":"ann_routine","addr":"print","name":"print_string","summary":"Prints the string at HL.","inputs":"HL = zero terminated text","clobbers":"AF HL"})")));
+        CHECK(!ok(annotate(R"({"cmd":"ann_routine","addr":"draw8","name":"draw_sprite_8x8","summary":"x","confidence":"certain"})")));
+        CHECK(ok(annotate(R"({"cmd":"ann_routine","addr":"draw8","name":"draw_sprite_8x8","summary":"x","confidence":"low"})")));
+        CHECK_EQ(str(ask(s, R"({"cmd":"routines"})").find("routines")->items()[1], "confidence"), std::string("low"));
+        CHECK(ok(annotate(R"({"cmd":"ann_remove","addr":"draw8"})")));
         CHECK(ok(annotate(R"({"cmd":"ann_label","addr":"draw8","name":"draw_sprite_8x8"})")));
         CHECK(ok(annotate(R"({"cmd":"ann_variable","addr":"counter","name":"run_counter","size":1,"comment":"number of runs"})")));
         CHECK(ok(annotate(R"({"cmd":"ann_data","addr":"msg","length":6,"kind":"text","name":"greeting"})")));

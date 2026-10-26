@@ -109,8 +109,10 @@ int main() {
 
         const RoutineDoc* none = a.routineAt(0x4000);
         CHECK(none == nullptr);
-        CHECK(!a.setRoutine(0x4100, {"clear_screen", "Clears the screen", "A = pen", "", "AF"}).has_value());
+        CHECK(!a.setRoutine(0x4100, {"clear_screen", "Clears the screen", "A = pen", "", "AF", "medium"}).has_value());
         CHECK_EQ(a.routineAt(0x4100)->summary, std::string("Clears the screen"));
+        CHECK_EQ(a.routineAt(0x4100)->confidence, std::string("medium"));
+        CHECK(a.setRoutine(0x4200, {"other_routine", "x", "", "", "", "certain"}).has_value());  // only high/medium/low
 
         // JSON round trip
         a.setComment(0x4000, "entry");
@@ -164,8 +166,8 @@ int main() {
     {
         Fixture f;
         CHECK(!f.ann.setRoutine(0x4040, {"print_string", "Prints the zero terminated string at HL with the firmware.",
-                                         "HL = address of the string", "HL points behind the terminator", "AF HL"}).has_value());
-        CHECK(!f.ann.setRoutine(0x4000, {"main", "Sets up the screen and prints the greeting.", "", "", ""}).has_value());
+                                         "HL = address of the string", "HL points behind the terminator", "AF HL", ""}).has_value());
+        CHECK(!f.ann.setRoutine(0x4000, {"main", "Sets up the screen and prints the greeting.", "", "", "", "low"}).has_value());
         CHECK(!f.ann.setLabel(0x4030, "delay").has_value());
         CHECK(!f.ann.setVariable({"call_count", 0xA010, 1, "number of times main ran"}).has_value());
         CHECK(!f.ann.setVariable({"cursor_pos", 0xA020, 2, "text cursor position"}).has_value());
@@ -190,6 +192,8 @@ int main() {
         EXPECT_IN(r.text, ";   clobbers: AF HL");
         EXPECT_IN(r.text, "called from: 4013");
         EXPECT_IN(r.text, "CALL print_string");
+        EXPECT_IN(r.text, ";   confidence: low - a guess, please verify");     // shown only for routines that are not "high"
+        EXPECT_NOT_IN(r.text, "confidence: high");
         EXPECT_IN(r.text, "JP delay");
         EXPECT_IN(r.text, "; Busy-wait loop");
         EXPECT_IN(r.text, "LD A,(call_count)");

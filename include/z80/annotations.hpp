@@ -17,6 +17,7 @@ struct RoutineDoc {
     std::string inputs;    ///< e.g. "HL = source, DE = screen address"
     std::string outputs;   ///< e.g. "A = number of pixels drawn"
     std::string clobbers;  ///< e.g. "AF BC"
+    std::string confidence;  ///< "", "high" (verified by a test), "medium" or "low" (a guess, to be checked)
 };
 
 /// A named memory location (a variable, or a table).

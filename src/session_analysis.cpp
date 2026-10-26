@@ -245,6 +245,7 @@ Json Session::Impl::cmdRoutines() {
         if (auto n = s.ann_.nameAt(a)) e.set("name", *n);
         else e.set("name", "sub_" + hexDigits(a, 4));
         e.set("documented", documented).set("size", info.size).set("ends_with", info.end).set("depth", depth[a]);
+        if (documented) e.set("confidence", s.ann_.routineAt(a)->confidence);
         Json callers = Json::array();
         if (auto it = dis.callers().find(a); it != dis.callers().end()) {
             int n = 0;
@@ -309,7 +310,7 @@ Json Session::Impl::cmdAnnotate(const std::string& cmd) {
         check(s.ann_.setLabel(a, text("name")));
     } else if (cmd == "ann_routine") {
         const Word a = addr("addr");
-        check(s.ann_.setRoutine(a, {text("name"), optText("summary"), optText("inputs"), optText("outputs"), optText("clobbers")}));
+        check(s.ann_.setRoutine(a, {text("name"), optText("summary"), optText("inputs"), optText("outputs"), optText("clobbers"), optText("confidence")}));
     } else if (cmd == "ann_variable") {
         VariableDoc v;
         v.address = addr("addr");

@@ -227,6 +227,9 @@ std::vector<std::string> Builder::headerFor(Word a) {
             field("in:", doc->inputs);
             field("out:", doc->outputs);
             field("clobbers:", doc->clobbers);
+            if (!doc->confidence.empty() && doc->confidence != "high") {
+                out.push_back(";   confidence: " + doc->confidence + (doc->confidence == "low" ? " - a guess, please verify" : " - not fully verified"));
+            }
             ++commented_;
         }
         if (options_.showXrefs && isCall) {
