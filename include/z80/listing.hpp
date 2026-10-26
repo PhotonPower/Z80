@@ -16,6 +16,7 @@ struct ListingOptions {
     bool showXrefs = true;     ///< "called from" lists
     bool hardwareComments = true;  ///< explain OUT (C),r to Gate Array / CRTC / PPI
     bool platformSymbols = true;   ///< show CPC firmware calls and hardware ports by name
+    bool addresses = false;        ///< prefix every line with its address (for reading, not re-assembling; disables verification)
 };
 
 struct ListingResult {

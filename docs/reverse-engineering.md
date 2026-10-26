@@ -125,6 +125,12 @@ python3 agent/z80_annotate.py --sna spiel.sna --entry 0x05DC --project spiel.pro
   unterhalb von &C000, nicht im Bildschirm), `HALT`, `IM 1/2` und das Installieren eines Interrupt-Handlers
   (`LD A,&C3` / `LD (&0038),A` / `LD HL,x` / `LD (&0039),HL` → „Handler bei x“). Auslöser war ein echter Lauf, in dem ein
   Modell genau das als „Scroll-Register“ missdeutet hat.
+- **Kommentare gehen nie verloren oder falsch**: Das Listing, das das Modell liest, hat die **Adresse jedes Befehls in der linken
+  Spalte** (das Modell muss nicht mehr Bytes zählen); ein Kommentar mitten in einem Befehl wird abgelehnt statt stillschweigend
+  verschluckt; und neben einem Benutzerkommentar bleibt die automatisch erkannte Hardware-Erklärung stehen
+  (`; mein Text [Gate Array: screen mode 1, …]`), damit ein falscher Kommentar eine Tatsache nicht verdeckt.
+  `run_routine` meldet für jeden Port-Schreibzugriff, **welcher Befehl** ihn ausgelöst hat und ob der zur Routine selbst gehört
+  oder zu aufgerufenem Code (ein Modell hatte PPI-Zugriffe einer Unterroutine den `OUT`-Zeilen der Routine zugeschrieben).
 - **Bildschirmadressen**: `LD DE,&C78A` bekommt den Hinweis *char row 24, byte column 10, scan line 0*.
 - **Variablen und Tabellen**: `LD A,(&A010)` → `LD A,(run_counter)` sobald benannt; Zeiger auf noch
   unbenannte Daten erscheinen als `data_xxxx`, Sprungziele als `sub_xxxx`/`loc_xxxx` (Platzhalter,

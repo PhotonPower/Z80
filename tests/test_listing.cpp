@@ -316,6 +316,32 @@ int main() {
         EXPECT_NOT_IN(renderListing(memory2, dis2, Annotations{}).text, "the interrupt handler is at");
     }
 
+    // ---- addresses for the reader, and hardware facts next to user comments ----
+    {
+        Fixture f;
+        ListingOptions options;
+        options.addresses = true;
+        const ListingResult r = renderListing(f.memory, f.dis, f.ann, options);
+        EXPECT_IN(r.text, "4000    LD BC,GATE_ARRAY+&8D");   // address column instead of the indentation
+        EXPECT_IN(r.text, "4003    OUT (C),C");
+        EXPECT_IN(r.text, "4040    LD A,(HL)");
+        CHECK(!r.verified);                                    // such a listing is for reading only
+        CHECK(r.verifyDetail.empty());
+
+        // a comment on an OUT line must not hide what the hardware analysis found
+        Annotations ann;
+        ann.setComment(0x4003, "set up the screen");
+        const ListingResult m = renderListing(f.memory, f.dis, ann);
+        EXPECT_IN(m.text, "set up the screen [Gate Array: screen mode 1,");   // long comments wrap onto the next line
+        EXPECT_IN(m.text, "upper ROM off]");
+        CHECK(m.verified);
+        // ... unless the comment already says the same
+        Annotations same;
+        same.setComment(0x4003, "Gate Array: screen mode 1, lower ROM off, upper ROM off");
+        const ListingResult s = renderListing(f.memory, f.dis, same);
+        EXPECT_NOT_IN(s.text, "ROM off  [");
+    }
+
     // ---- nothing analysed ----
     {
         Memory memory;

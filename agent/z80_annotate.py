@@ -192,7 +192,8 @@ TOOLS = [
     _fn("mark_data", "Declare a range as data (not code) and how to display it.",
         {"addr": ADDR, "length": {"type": "integer"}, "kind": {"type": "string", "enum": ["bytes", "words", "text", "pointers"]},
          "name": {"type": "string"}, "comment": {"type": "string"}}, ["addr", "length", "kind"]),
-    _fn("add_comment", "Comment for one line of code (appears behind the instruction), or a block comment above it.",
+    _fn("add_comment", "Comment for one line of code (appears behind the instruction), or a block comment above it. Use the exact address "
+                       "from the LEFT COLUMN of the listing; an address inside an instruction is refused.",
         {"addr": ADDR, "text": {"type": "string"}, "block": {"type": "boolean"}}, ["addr", "text"]),
     _fn("finish_routine", "Call when the routine is fully documented and commented.", {"summary": {"type": "string"}}),
 ]
@@ -388,7 +389,7 @@ class Tools:
 
     # ---- reading ----
     def t_get_listing(self, **a):
-        r = self.s.ok(cmd="listing", verify=False, max_chars=24000, **{"from": norm_addr(a["from"]), "to": norm_addr(a["to"])})
+        r = self.s.ok(cmd="listing", verify=False, addresses=True, max_chars=24000, **{"from": norm_addr(a["from"]), "to": norm_addr(a["to"])})
         return r["text"] + ("\n[listing truncated]" if r.get("truncated") else "")
 
     def t_disassemble(self, addr, count=16):
@@ -450,7 +451,16 @@ class Tools:
             out.append(f"text printed via firmware: {text!r}")
         ports = s.ok(cmd="io")["output"]
         if ports:
-            out.append("hardware port writes: " + "; ".join(f'{p["port"]}<-{p["value"]}' + (f' ({p["what"]})' if "what" in p else "") for p in ports[:12]) + (" ..." if len(ports) > 12 else ""))
+            lo, hi = (int(self.range[0], 16), int(self.range[1], 16)) if self.range else (0, 0)
+            own = [p for p in ports if lo <= int(p["pc"], 16) <= hi]
+            other = [p for p in ports if not lo <= int(p["pc"], 16) <= hi]
+            out.append(f"hardware port writes: {len(ports)} in total - {len(own)} by this routine's own OUT instructions, "
+                       f"{len(other)} by the code it calls (do NOT attribute those to this routine's OUT lines):")
+            for label, group, limit in (("this routine", own, 10), ("called code", other, 5)):
+                for p in group[:limit]:
+                    out.append(f'  {p["port"]}<-{p["value"]} written at {p["pc"]} [{label}]' + (f' {p["what"]}' if "what" in p else ""))
+                if len(group) > limit:
+                    out.append(f"  ... and {len(group) - limit} more from {label}")
 
         d = s.ok(cmd="screen_diff", a="_before")
         if d.get("changed_pixels", 0) == 0:
@@ -563,6 +573,8 @@ SYSTEM_PROMPT = """You are an expert Z80 and Amstrad CPC reverse engineer. You d
 assembler listing reads like the original source code, with meaningful names and helpful comments.
 
 How you work:
+0. Every line of the listing starts with the ADDRESS of its instruction (left column). Copy addresses from there; never count bytes yourself.
+   Comments and names only work at those exact addresses.
 1. Read the listing of the routine. Firmware calls (e.g. TXT_OUTPUT, SCR_SET_MODE) and hardware ports (GATE_ARRAY, CRTC_SELECT, PPI_*)
    already appear by name; the comments next to OUT instructions explain the hardware effect. Routines called by this one that are already
    documented appear with their real names.
@@ -659,7 +671,7 @@ class Annotator:
     def routine_prompt(self, r, gaps=None):
         addr = r["addr"]
         end = f'0x{int(addr, 16) + max(r["size"], 1) - 1:04X}'
-        listing = self.s.ok(cmd="listing", verify=False, max_chars=14000, **{"from": addr, "to": end})
+        listing = self.s.ok(cmd="listing", verify=False, addresses=True, max_chars=14000, **{"from": addr, "to": end})
         callees = []
         for c in r["calls"]:
             if "name" in c:

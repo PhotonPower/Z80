@@ -281,6 +281,7 @@ Json Session::Impl::cmdListing() {
     if (const Json* v = req.find("to")) options.to = address(*v, "to");
     options.verify = flag("verify", true);
     options.showXrefs = flag("xrefs", true);
+    options.addresses = flag("addresses", false);
     RamView ram(s);
     const ListingResult r = renderListing(s.memory_, *s.dis_, s.ann_, options);
     const auto maxChars = static_cast<std::size_t>(integer("max_chars", 60000, 1000, 10'000'000));
@@ -322,6 +323,14 @@ Json Session::Impl::cmdAnnotate(const std::string& cmd) {
         DataRegion r;
         r.address = addr("addr");
         r.length = static_cast<unsigned>(integer("length", 0, 1, 0x10000));
+        if (s.dis_) {
+            for (unsigned k = r.address; k < r.address + r.length && k <= 0xFFFF; ++k) {
+                if (s.dis_->isInstructionStart(static_cast<Word>(k))) {
+                    throw SessionError("the range contains code (an instruction starts at &" + hexDigits(k, 4) +
+                                       "); mark_data is for data only. For a single variable that lives inside the code use name_variable.");
+                }
+            }
+        }
         const auto kind = dataKindFromString(optText("kind").empty() ? "bytes" : optText("kind"));
         if (!kind) throw SessionError("kind must be bytes, words, text or pointers");
         r.kind = *kind;
@@ -330,6 +339,20 @@ Json Session::Impl::cmdAnnotate(const std::string& cmd) {
         check(s.ann_.setData(r));
     } else if (cmd == "ann_comment") {
         const Word a = addr("addr");
+        if (s.dis_ && s.dis_->isCovered(a) && !s.dis_->isInstructionStart(a)) {
+            // such a comment would never appear in the listing: say where the instruction really starts
+            RamView ram(s);
+            for (unsigned back = 1; back <= 3; ++back) {
+                const Word start = static_cast<Word>(a - back);
+                if (!s.dis_->isInstructionStart(start)) continue;
+                const Instruction ins = decode(s.memory_, start, {});
+                if (start + ins.length > a) {
+                    throw SessionError("address &" + hexDigits(a, 4) + " is in the middle of the instruction at &" + hexDigits(start, 4) + " (" +
+                                       ins.mnemonic + (ins.operands.empty() ? "" : " " + ins.operands) + "), where no comment can be shown. Comment the instruction start &" +
+                                       hexDigits(start, 4) + " instead. The listing has the address of every instruction in its left column.");
+                }
+            }
+        }
         const std::string t = text("text");
         if (flag("block", false)) s.ann_.setBlockComment(a, t);
         else s.ann_.setComment(a, t);

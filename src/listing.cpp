@@ -420,6 +420,8 @@ void Builder::codeLine(Word a, Line& line) {
     line.code = operands.empty() ? ins.mnemonic : ins.mnemonic + " " + operands;
     if (const std::string* c = ann_.commentAt(a)) {
         line.comment = *c;
+        // what the hardware/idiom analysis found is a fact; a human or model comment must not hide it
+        if (!autoComment.empty() && c->find(autoComment) == std::string::npos) line.comment += "  [" + autoComment + "]";
         ++commented_;
         ++userComments_;
     } else if (!autoComment.empty()) {
@@ -603,7 +605,7 @@ ListingResult Builder::build() {
 
     for (const auto& l : lines_) {
         for (const auto& b : l.before) out << b << "\n";
-        std::string code = "        " + l.code;
+        std::string code = (options_.addresses ? h4(l.address) + "    " : std::string("        ")) + l.code;
         if (!l.comment.empty()) {
             const auto wrapped = wrapText(l.comment, 60);
             code = padTo(code, 44) + "; " + wrapped[0];
@@ -662,7 +664,7 @@ ListingResult renderListing(const Memory& memory, const Disassembler& dis, const
     Builder builder(ram, dis, ann, options, from, to);
     ListingResult result = builder.build();
 
-    if (options.verify) {
+    if (options.verify && !options.addresses) {
         AssemblerOptions assemblerOptions;
         const AssemblyResult assembled = Assembler(assemblerOptions).assemble(result.text);
         if (!assembled.ok()) {

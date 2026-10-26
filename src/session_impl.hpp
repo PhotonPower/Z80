@@ -531,9 +531,11 @@ struct Session::Impl {
         if (cmd == "nmi") { cpu.requestNmi(); return j; }
         if (cmd == "io") {
             Json out = Json::array();
-            for (const auto& [port, v] : s.ioLog_) {
+            for (const auto& w : s.ioLog_) {
+                const Word port = w.port;
+                const Byte v = w.value;
                 Json e = Json::object();
-                e.set("port", hex16(port)).set("value", hex8(v));
+                e.set("port", hex16(port)).set("value", hex8(v)).set("pc", hex16(w.pc));
                 if (s.cpc_) {
                     const std::string what = cpc::describePortWrite(port, v);
                     if (!what.empty()) e.set("what", what);

@@ -28,7 +28,7 @@ Session::Session(SessionOptions options)
             return b;
         },
         [this](Word port, Byte value) {
-            ioLog_.emplace_back(port, value);
+            ioLog_.push_back({port, value, static_cast<Word>(cpu_.regs().pc - 2)});  // OUT (n),A and OUT (C),r are 2 bytes long
             while (ioLog_.size() > options_.maxIoLog) ioLog_.pop_front();
             if (cpc_ && video_.writePort(port, value)) applyRomState();
         });

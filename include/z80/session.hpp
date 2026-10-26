@@ -57,7 +57,12 @@ private:
         cpc::VideoState video;  ///< screen mode, palette, CRTC (restored on rollback)
     };
     std::map<std::string, Checkpoint> checkpoints_;
-    std::deque<std::pair<Word, Byte>> ioLog_;
+    struct IoWrite {
+        Word port = 0;
+        Byte value = 0;
+        Word pc = 0;  ///< address of the OUT instruction that wrote
+    };
+    std::deque<IoWrite> ioLog_;
     std::deque<Byte> input_;
 
     // ---- reverse-engineering state (see session_analysis.cpp) ----

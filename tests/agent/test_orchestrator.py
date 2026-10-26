@@ -575,6 +575,47 @@ class HardeningTest(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertEqual(mock.requests, [])                                       # no chat request was made
 
+    def test_listing_for_the_model_has_addresses_and_wrong_comment_addresses_are_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            sna, sym = build_snapshot(d)
+            start = sym["START"]
+            plans = {f"0x{start:04x}": [
+                [("add_comment", {"addr": f"0x{start + 1:04x}", "text": "inside LD A,1"})],      # not an instruction start
+                [("add_comment", {"addr": f"0x{start:04x}", "text": "set the screen mode"})],     # the right place
+                [("document_routine", {"addr": f"0x{start:04x}", "name": "show_demo", "summary": "x"})],
+                [("finish_routine", {})], [("finish_routine", {})]]}
+            mock = MockOllama(plans)
+            host = mock.start()
+            try:
+                code, printed = OrchestratorTest("run_main").run_main(["--sna", sna, "--host", host, "--model", "mock", "--only", f"0x{start:04x}",
+                                                                       "--max-turns", "6", "--z80tool", Z80TOOL])
+            finally:
+                mock.stop()
+            first_prompt = mock.requests[0]["messages"][1]["content"]
+            self.assertIn(f"{start:04X}    LD A,&01", first_prompt)                  # the address column the model must use
+            self.assertIn(f"{start + 2:04X}    CALL SCR_SET_MODE", first_prompt)
+            self.assertIn("left column", mock.requests[0]["messages"][0]["content"])  # the system prompt says so, too
+            error = next(r for r in mock.tool_results if "middle of the instruction" in r)
+            self.assertIn(f"&{start:04X}", error)                                      # tells where the instruction starts
+            self.assertTrue(error.startswith("error:"))
+
+    def test_run_routine_attributes_port_writes_to_their_origin(self):
+        server = annotate.Z80Server(Z80TOOL)
+        try:
+            server.ok(cmd="machine", type="cpc")
+            server.ok(cmd="asm", source="ORG &4000\nouter: LD BC,&7F8D\nOUT (C),C\nCALL inner\nRET\ninner: LD A,&10\nLD BC,&BC0C\nOUT (C),C\nRET\n")
+            server.ok(cmd="analyze", entries=["outer"])
+            server.ok(cmd="checkpoint", name="baseline")
+            tools = annotate.Tools(server)
+            tools.range = ("0x4000", "0x4007")          # the routine "outer" only (up to and including its RET)
+            out = tools.t_run_routine("0x4000")
+            self.assertIn("hardware port writes: 2 in total - 1 by this routine's own OUT instructions, 1 by the code it calls", out)
+            self.assertIn("0x7F8D<-0x8D written at 0x4003 [this routine] Gate Array: screen mode 1", out)
+            self.assertIn("0xBC0C<-0x0C written at 0x400E [called code] CRTC: select register 12", out)
+            self.assertIn("do NOT attribute", out)
+        finally:
+            server.close()
+
     def test_repeated_failures_get_a_hint(self):
         with tempfile.TemporaryDirectory() as d:
             sna, sym = build_snapshot(d)

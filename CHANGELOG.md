@@ -6,6 +6,12 @@ die Versionierung an [Semantic Versioning](https://semver.org/lang/de/).
 
 ## [Unreleased]
 
+### Behoben
+- Kommentare an Adressen mitten in Befehlen wurden stillschweigend verworfen: das Modell-Listing hat jetzt eine Adressspalte,
+  `ann_comment` lehnt solche Adressen mit Erklärung ab, `ann_data` lehnt Bereiche über Code ab.
+- Ein Benutzerkommentar verdeckte die automatische Hardware-Erklärung; beide werden jetzt gezeigt.
+- `run_routine`: Port-Schreibzugriffe nennen den schreibenden Befehl (`pc`) und ob er zur Routine gehört.
+
 ### Hinzugefügt
 - **Mehrere Durchgänge** im Orchestrator (`--refine-model`, `--report`, …): schnelles Modell zuerst, weitere Modelle
   prüfen und ergänzen nur Routinen mit gemessenen Lücken; Fähigkeitserkennung über Ollama `/api/show`

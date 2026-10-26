@@ -219,6 +219,42 @@ int main() {
         CHECK(has(str(ask(s, R"({"cmd":"listing"})"), "text"), "sub_402E"));  // back to the automatic name
     }
 
+    // ---- comments must land on instructions; data ranges must not cover code; port writes know their origin ----
+    {
+        Session s;
+        ask(s, R"({"cmd":"machine","type":"cpc"})");
+        ask(s, R"({"cmd":"asm","source":"ORG &4000\nstart: LD BC,&7F8D\nOUT (C),C\nLD A,1\nOUT (&FE),A\nLD IY,&AB28\nRET\ndata1: DB 1,2,3\n"})");
+        ask(s, R"({"cmd":"analyze","entries":["start"]})");
+        // &4003 starts OUT (C),C; &4001 and &4002 are inside LD BC,nn; &400A is inside LD IY,nn (which starts at &4009)
+        CHECK(ok(ask(s, R"({"cmd":"ann_comment","addr":"0x4003","text":"fine"})")));
+        const Json inside = ask(s, R"({"cmd":"ann_comment","addr":"0x4001","text":"lost"})");
+        CHECK(!ok(inside));
+        CHECK(has(str(inside, "error"), "middle of the instruction at &4000 (LD BC,"));
+        CHECK(has(str(inside, "error"), "left column"));
+        CHECK(!ok(ask(s, R"({"cmd":"ann_comment","addr":"0x400A","text":"lost","block":true})")));
+        CHECK(has(str(ask(s, R"({"cmd":"ann_comment","addr":"0x400A","text":"x"})"), "error"), "instruction at &4009 (LD IY,"));
+        CHECK(ok(ask(s, R"({"cmd":"ann_comment","addr":"0x4009","text":"the instruction start itself is fine"})")));
+        CHECK(ok(ask(s, R"({"cmd":"ann_comment","addr":"data1","text":"a data address is always fine"})")));
+        CHECK(ok(ask(s, R"({"cmd":"ann_comment","addr":"0x5000","text":"nothing analysed there: allowed"})")));
+        // data regions over code are refused, behind the code they are fine
+        const Json overCode = ask(s, R"({"cmd":"ann_data","addr":"0x4003","length":4,"kind":"bytes","name":"table"})");
+        CHECK(!ok(overCode));
+        CHECK(has(str(overCode, "error"), "contains code"));
+        CHECK(has(str(overCode, "error"), "name_variable"));
+        CHECK(ok(ask(s, R"({"cmd":"ann_data","addr":"data1","length":3,"kind":"bytes","name":"table"})")));
+        // a variable inside the code (self-modifying) is still possible with name_variable
+        CHECK(ok(ask(s, R"({"cmd":"ann_variable","addr":"0x4006","name":"patched_value","size":1,"comment":"operand of LD A,n"})")));
+
+        // the io log says which instruction wrote
+        ask(s, R"({"cmd":"io"})");
+        CHECK(ok(ask(s, R"({"cmd":"call","addr":"start"})")));
+        const Json io = ask(s, R"({"cmd":"io"})");
+        const auto& writes = io.find("output")->items();
+        CHECK_EQ(writes.size(), std::size_t{2});
+        CHECK_EQ(str(writes[0], "pc"), std::string("0x4003"));   // OUT (C),C
+        CHECK_EQ(str(writes[1], "pc"), std::string("0x4007"));   // OUT (&FE),A
+    }
+
     // ---- files: annotations, snapshot, ROMs ----
     {
         const auto dir = std::filesystem::temp_directory_path();
