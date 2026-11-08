@@ -247,7 +247,23 @@ Ohne `--rom` fängt der Emulator Aufrufe der Firmware-Sprungleiste (`&B900-&BDFF
 (`SCR_SET_MODE`, `MC_SET_MODE`, `SCR_CLEAR`, `SCR_SET_INK`, `SCR_SET_BORDER`, `MC_SET_INKS`;
 `TXT_OUTPUT` sammelt den Text in `console`), danach kehrt die Routine zurück. Das reicht, um zu sehen,
 *was* ein Programm von der Firmware will. Zeichen werden **nicht** gemalt (ohne ROM gibt es keinen
-Zeichensatz), Tastaturabfragen liefern nichts.
+Zeichensatz).
+
+Für ganze Spiele bilden die Stubs einen kleinen **Kernel** nach:
+
+- **Laufwerk** (`insert_disk`): AMSDOS-Dateien (`CAS_IN_*`), die Diskbefehle über `KL_FIND_COMMAND` und `RST &18`
+  (READ/WRITE SECTOR auch auf kopiergeschützten Spuren), `MC_START_PROGRAM`; `disk_log` zeigt, was wann geladen wurde.
+  So lässt sich ein Spiel analysieren, das während des Spiels nachlädt.
+- **Interrupts**: der Interrupt-Einsprung der Firmware (`&0038` → `&B941`), das Frame-Flyback-Ereignis
+  (`KL_NEW_FRAME_FLY`, mit gesicherten Registern), das Zurückschreiben der Farbtabelle bei jedem Bildrücklauf
+  (wie das Screen-Pack), `KL_L_ROM_*` mit `EI` am Ende.
+- **Sprungleiste und Restart-Block**: die Einträge enthalten wie im Original `RST &08` + ROM-Adresse; ein Programm, das
+  die Adresse liest und das ROM direkt aufruft (z. B. `MC WAIT FLYBACK`), landet trotzdem im Stub. `&000E`/`&0016`/`&001E`
+  enthalten PCBC/PCDE/PCHL.
+- **Eingaben** (`controls`): Joystick und Tasten für `KM_GET_JOYSTICK`, `KM_TEST_KEY` und die Tastaturmatrix.
+- **Bild**: Rasterteilungen (Modus/Farben mitten im Bild) erscheinen im Screenshot zeilengenau.
+- **`coverage`** zeichnet auf, welcher Code lief – ausgeführte Adressen, die die Flussanalyse nicht erreicht, sind
+  Einsprungpunkte (Interrupt-Handler, Vektoren, Tabellen).
 
 Mit `--rom DATEI:both` (ein 32-KiB-Abbild: unteres ROM + BASIC) bzw. `--rom os.rom:lower --rom basic.rom:upper`
 läuft die **echte Firmware**; die ROMs blendet das Gate Array wie auf der Hardware ein und aus.

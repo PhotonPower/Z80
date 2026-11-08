@@ -21,10 +21,110 @@ void Session::installFirmwareStubs() {
     // The firmware jump block (&B900-&BDFF) lives in RAM and jumps into the lower ROM. Without that ROM
     // the calls are intercepted: they are logged, a few are emulated, and the routine "returns".
     cpu_.setExecHook(0xB900, 0xBDFF, [this](Cpu& cpu) { return firmwareStub(cpu); });
+    // As on a real CPC, the restarts in RAM lead into the firmware: RST &38 (the IM 1 interrupt) to its handler, RST &18 (FAR CALL) to
+    // the stubs. Only written where the RAM is still empty (a snapshot or a program may have put its own code there).
+    auto install = [this](Word at, Word target) {
+        if (memory_.read(at) == 0 && memory_.read(static_cast<Word>(at + 1)) == 0 && memory_.read(static_cast<Word>(at + 2)) == 0) {
+            memory_.write(at, 0xC3);
+            memory_.write(static_cast<Word>(at + 1), static_cast<Byte>(target));
+            memory_.write(static_cast<Word>(at + 2), static_cast<Byte>(target >> 8));
+        }
+    };
+    install(0x0038, kInterruptEntry);
+    install(0x0018, kFarCallEntry);
+    // the small instructions of the restart block that programs call directly: PCBC (&000E), PCDE (&0016), PCHL (&001E)
+    auto put = [this](Word at, std::initializer_list<Byte> bytes) {
+        bool empty = true;
+        for (std::size_t i = 0; i < bytes.size(); ++i) empty = empty && memory_.read(static_cast<Word>(at + i)) == 0;
+        if (!empty) return;
+        Word a = at;
+        for (Byte b : bytes) memory_.write(a++, b);
+    };
+    put(0x000E, {0xC5, 0xC9});  // PUSH BC : RET
+    put(0x0016, {0xD5, 0xC9});  // PUSH DE : RET
+    put(0x001E, {0xE9});        // JP (HL)
+    put(0x003B, {0xC9});        // EXT INTERRUPT: RET
+    // the jump block itself, as programs read it: B900-BAFF (high kernel) JP to itself, BB00- RST &08 (LOW JUMP) + an address in the
+    // lower ROM (bit 15: upper ROM off)
+    bool blockEmpty = true;
+    for (unsigned a = 0xB900; a <= 0xBDFF; ++a) blockEmpty = blockEmpty && memory_.read(static_cast<Word>(a)) == 0;
+    if (blockEmpty) {
+        for (unsigned a = 0xB900; a + 2 <= 0xBAFF; a += 3) {
+            memory_.write(static_cast<Word>(a), 0xC3);
+            memory_.write(static_cast<Word>(a + 1), static_cast<Byte>(a));
+            memory_.write(static_cast<Word>(a + 2), static_cast<Byte>(a >> 8));
+        }
+        for (unsigned a = 0xBB00; a + 2 <= 0xBDFF; a += 3) {
+            const auto rom = static_cast<Word>(0x8000 | (kFakeRom + (a - 0xB900)));
+            memory_.write(static_cast<Word>(a), 0xCF);
+            memory_.write(static_cast<Word>(a + 1), static_cast<Byte>(rom));
+            memory_.write(static_cast<Word>(a + 2), static_cast<Byte>(rom >> 8));
+        }
+    }
+}
+
+void Session::setStubLowerRom(bool on) {
+    // while the lower ROM is "on", the hook also covers the fake ROM addresses (and costs a call per instruction)
+    stubLowerRom_ = on;
+    cpu_.setExecHookRange(on ? 0x0000 : 0xB900, 0xBDFF);
 }
 
 bool Session::firmwareStub(Cpu& cpu) {
     Registers& r = cpu.regs();
+    if (r.pc < 0xB900) {
+        // a direct call into the (fake) lower ROM: handled like the jump block entry it belongs to
+        if (!stubLowerRom_ || r.pc < kFakeRom || r.pc > kFakeRom + 0x4FF) return false;
+        const Word rom = r.pc;
+        r.pc = static_cast<Word>(0xB900 + (rom - kFakeRom));
+        if (firmwareStub(cpu)) return true;
+        r.pc = rom;
+        return false;
+    }
+    if (r.pc == kInterruptEntry || r.pc == kInterruptEntry + 1) {
+        // the firmware's interrupt handler: once per frame (the interrupt during the vertical sync) the frame flyback event
+        // runs; it returns to the second entry, which returns from the interrupt with EI
+        if (r.pc == kInterruptEntry && firmwareInks_ && cpu.cycles() % 79872 < 13312 && video_.inks != *firmwareInks_) {
+            // the screen pack's part of the frame flyback: the inks of its table go to the hardware again
+            const cpc::VideoState before = video_;
+            video_.inks = *firmwareInks_;
+            noteVideoChange(before);
+        }
+        if (r.pc == kInterruptEntry && frameFlyRoutine_ && cpu.cycles() % 79872 < 13312 && eventSaves_.size() < 4) {
+            eventSaves_.push_back(r);  // like the firmware, the event runs with the interrupted program's registers saved
+            r.sp = static_cast<Word>(r.sp - 2);
+            memory_.write(r.sp, static_cast<Byte>(kInterruptEntry + 1));
+            memory_.write(static_cast<Word>(r.sp + 1), static_cast<Byte>((kInterruptEntry + 1) >> 8));
+            r.pc = *frameFlyRoutine_;
+            return true;
+        }
+        if (r.pc == kInterruptEntry + 1 && !eventSaves_.empty()) {
+            const Registers saved = eventSaves_.back();
+            eventSaves_.pop_back();
+            r.main = saved.main;
+            r.alt = saved.alt;
+            r.ix = saved.ix;
+            r.iy = saved.iy;
+        }
+        r.iff1 = r.iff2 = true;
+        const Word lo = memory_.read(r.sp);
+        const Word hi = memory_.read(static_cast<Word>(r.sp + 1));
+        r.sp = static_cast<Word>(r.sp + 2);
+        r.pc = static_cast<Word>(lo | (hi << 8));
+        return true;
+    }
+    if (disk_ && r.pc >= kBiosEntry && r.pc < kBiosEntry + 9) return biosCommand(cpu, 0x81u + (r.pc - kBiosEntry));
+    if (disk_ && r.pc == kFarCallEntry) {
+        // RST &18: the inline word behind it points to a far address (address, ROM). A disc BIOS command is emulated, anything else is
+        // called like a near routine; either way execution continues behind the inline word.
+        const Word ret = static_cast<Word>(memory_.read(r.sp) | (memory_.read(static_cast<Word>(r.sp + 1)) << 8));
+        const Word ptr = static_cast<Word>(memory_.read(ret) | (memory_.read(static_cast<Word>(ret + 1)) << 8));
+        const Word far = static_cast<Word>(memory_.read(ptr) | (memory_.read(static_cast<Word>(ptr + 1)) << 8));
+        const auto behind = static_cast<Word>(ret + 2);
+        memory_.write(r.sp, static_cast<Byte>(behind));
+        memory_.write(static_cast<Word>(r.sp + 1), static_cast<Byte>(behind >> 8));
+        r.pc = far;  // a stub address is handled on the next step, with the corrected return address on the stack
+        return true;
+    }
     const auto name = cpc::firmwareName(r.pc);
     if (!name) return false;
     std::optional<Word> callSite;
@@ -44,6 +144,7 @@ bool Session::firmwareStub(Cpu& cpu) {
         for (unsigned i = 0; i < 0x4000; ++i) memory_.write(static_cast<Word>(base + i), 0);
     };
     const Byte a = r.a();
+    const cpc::VideoState videoBefore = video_;
     if (*name == "TXT_OUTPUT") {
         if (a >= 0x20 && a < 0x7F) console_ += static_cast<char>(a);
         else if (a == 0x0D || a == 0x0A) console_ += '\n';
@@ -58,17 +159,244 @@ bool Session::firmwareStub(Cpu& cpu) {
     } else if (*name == "SCR_SET_INK") {
         const Byte ink = r.main[0] <= 26 ? r.main[0] : Byte{0};  // B = first ink
         video_.inks[a & 15] = cpc::kInkToHardware[ink];
+        if (!firmwareInks_) firmwareInks_ = video_.inks;
+        (*firmwareInks_)[a & 15] = cpc::kInkToHardware[ink];
     } else if (*name == "SCR_SET_BORDER") {
         const Byte ink = r.main[0] <= 26 ? r.main[0] : Byte{0};
         video_.inks[16] = cpc::kInkToHardware[ink];
+        if (!firmwareInks_) firmwareInks_ = video_.inks;
+        (*firmwareInks_)[16] = cpc::kInkToHardware[ink];
     } else if (*name == "MC_SET_INKS") {
-        for (Word i = 0; i < 17; ++i) video_.inks[i] = memory_.read(static_cast<Word>(r.hl() + i)) & 0x1F;
+        // DE = the border colour, then the 16 pens (hardware colour numbers)
+        video_.inks[16] = memory_.read(r.de()) & 0x1F;
+        for (Word i = 0; i < 16; ++i) video_.inks[i] = memory_.read(static_cast<Word>(r.de() + 1 + i)) & 0x1F;
+    }
+    if (videoBefore.mode != video_.mode || videoBefore.inks != video_.inks) noteVideoChange(videoBefore);
+    if (*name == "KL_NEW_FRAME_FLY" || *name == "KL_ADD_FRAME_FLY") {
+        frameFlyRoutine_ = r.de();  // HL = the event block, B = class, C = ROM, DE = routine
+    } else if (*name == "KL_DEL_FRAME_FLY") {
+        frameFlyRoutine_.reset();
+    } else if (*name == "KM_GET_JOYSTICK") {
+        r.main[4] = joystick_;   // H
+        r.main[5] = joystick2_;  // L
+        r.main[7] = joystick_;
+    } else if (*name == "KM_TEST_KEY") {
+        const bool down = keyDown(a & 0x7F);
+        r.main[6] = static_cast<Byte>((r.f() & ~0x40) | (down ? 0 : 0x40));  // NZ = pressed
+        r.main[1] = 0;  // C = shift/control state
+    } else if (*name == "SCR_GET_MODE") {
+        r.main[7] = video_.mode;
+        r.main[6] = static_cast<Byte>((r.f() & ~0x41) | (video_.mode == 0 ? 0x01 : 0) | (video_.mode == 1 ? 0x40 : 0));
+    } else if (*name == "SCR_GET_INK") {
+        Byte ink = 0;  // the firmware colour number of the pen's hardware colour
+        for (Byte i = 0; i < 27; ++i) {
+            if (cpc::kInkToHardware[i] == (video_.inks[a & 15] & 0x1F)) ink = i;
+        }
+        r.main[0] = r.main[1] = ink;
+    }
+    if (name->rfind("KL_U_ROM_", 0) == 0 || name->rfind("KL_L_ROM_", 0) == 0 || *name == "KL_ROM_RESTORE") {
+        r.iff1 = r.iff2 = true;  // the high kernel switches the ROMs with interrupts off and ends with EI
+    }
+    if (*name == "KL_L_ROM_ENABLE") {
+        r.main[7] = stubLowerRom_ ? 0x00 : 0x04;  // A = the previous ROM state
+        setStubLowerRom(true);
+    } else if (*name == "KL_L_ROM_DISABLE") {
+        r.main[7] = stubLowerRom_ ? 0x00 : 0x04;
+        setStubLowerRom(false);
+    } else if (*name == "KL_ROM_RESTORE") {
+        setStubLowerRom((a & 0x04) == 0);
+    } else if (*name == "MC_WAIT_FLYBACK") {
+        // returns once the vertical sync is on: the frame starts with it in this emulation
+        const std::uint64_t phase = cpu.cycles() % 79872;
+        if (phase >= 4096) {
+            CpuState st = cpu.state();
+            st.cycles += 79872 - phase;
+            cpu.setState(st);
+        }
+    } else if (*name == "MC_START_PROGRAM") {
+        // the program starts with a fresh stack and does not return
+        r.sp = 0xC000;
+        r.pc = r.hl();
+        return true;
+    } else if (disk_ && (name->rfind("CAS_IN_", 0) == 0 || *name == "KL_FIND_COMMAND")) {
+        if (diskStub(cpu, *name)) return true;
     }
     // emulate RET
     const Word lo = memory_.read(r.sp);
     const Word hi = memory_.read(static_cast<Word>(r.sp + 1));
     r.sp = static_cast<Word>(r.sp + 2);
     r.pc = static_cast<Word>(lo | (hi << 8));
+    return true;
+}
+
+// ---- the virtual disc drive ------------------------------------------------------------------------
+
+namespace {
+constexpr Byte kCarryFlag = 0x01, kZeroFlag = 0x40;
+void setCarryZero(Registers& r, bool carry, bool zero) {
+    auto f = static_cast<Byte>(r.f() & ~(kCarryFlag | kZeroFlag));
+    if (carry) f |= kCarryFlag;
+    if (zero) f |= kZeroFlag;
+    r.main[6] = f;
+}
+}  // namespace
+
+bool Session::diskStub(Cpu& cpu, const std::string& name) {
+    Registers& r = cpu.regs();
+    const Word ret = static_cast<Word>(memory_.read(r.sp) | (memory_.read(static_cast<Word>(r.sp + 1)) << 8));
+    const auto site = static_cast<Word>(ret - 3);
+    auto finish = [&] {  // RET
+        r.sp = static_cast<Word>(r.sp + 2);
+        r.pc = ret;
+        return true;
+    };
+    auto log = [&](std::string what, Word address, std::size_t bytes) {
+        diskLog_.push_back({std::move(what), address, bytes, site});
+        while (diskLog_.size() > 256) diskLog_.pop_front();
+    };
+    if (name == "KL_FIND_COMMAND") {
+        // the disc BIOS commands &81-&89 (one character with bit 7) are known; the caller reaches them through the address returned
+        const Byte first = memory_.read(r.hl());
+        if (first >= 0x81 && first <= 0x89) {
+            r.setHl(static_cast<Word>(kBiosEntry + (first - 0x81)));
+            r.main[1] = 7;  // C = ROM number of AMSDOS
+            setCarryZero(r, true, false);
+            // from now on RST &18 (FAR CALL) reaches the stubs
+            memory_.write(0x0018, 0xC3);
+            memory_.write(0x0019, static_cast<Byte>(kFarCallEntry));
+            memory_.write(0x001A, static_cast<Byte>(kFarCallEntry >> 8));
+        } else {
+            setCarryZero(r, false, false);
+        }
+        return finish();
+    }
+    if (name == "READ_SECTOR") {
+        // HL = buffer, E = drive, D = track, C = sector ID
+        const Byte track = r.main[2], id = r.main[1];
+        const auto* sec = disk_->sector(track, id);
+        if (!sec) {
+            log("sector " + std::to_string(track) + "/&" + hexDigits(id, 2) + " missing", r.hl(), 0);
+            r.main[7] = 0x20;  // A = an FDC error
+            setCarryZero(r, false, false);
+            return finish();
+        }
+        for (std::size_t i = 0; i < sec->data.size(); ++i) memory_.write(static_cast<Word>(r.hl() + i), sec->data[i]);
+        log("sector " + std::to_string(track) + "/&" + hexDigits(id, 2), r.hl(), sec->data.size());
+        setCarryZero(r, true, false);
+        return finish();
+    }
+    if (name == "CAS_IN_OPEN") {
+        // B = name length, HL = name, DE = 2 KiB buffer
+        std::string fname;
+        for (unsigned i = 0; i < r.main[0]; ++i) {
+            fname += static_cast<char>(std::toupper(memory_.read(static_cast<Word>(r.hl() + i)) & 0x7F));
+        }
+        while (!fname.empty() && fname.back() == ' ') fname.pop_back();
+        std::vector<std::string> tries{fname};
+        if (fname.find('.') == std::string::npos) tries = {fname, fname + ".BAS", fname + ".BIN"};  // what AMSDOS tries without an extension
+        for (const std::string& t : tries) {
+            std::vector<Byte> data;
+            try {
+                data = disk_->readFile(t);
+            } catch (const DskError&) {
+                continue;
+            }
+            inFile_ = InFile{};
+            inFile_.open = true;
+            inFile_.name = t;
+            std::vector<Byte> header(64, 0);
+            if (const auto h = parseAmsdosHeader(data)) {
+                std::copy(data.begin(), data.begin() + 64, header.begin());
+                const std::size_t n = std::min<std::size_t>(h->length, data.size() - 128);
+                inFile_.data.assign(data.begin() + 128, data.begin() + 128 + static_cast<std::ptrdiff_t>(n));
+                inFile_.load = h->load;
+                inFile_.entry = h->exec;
+                inFile_.type = h->type;
+            } else {
+                inFile_.data = data;
+                while (!inFile_.data.empty() && inFile_.data.back() == 0x1A) inFile_.data.pop_back();  // CP/M end of file
+                for (std::size_t i = 0; i < t.size() && i < 16; ++i) header[1 + i] = static_cast<Byte>(t[i]);
+                header[18] = 0x16;  // ASCII file
+                header[24] = static_cast<Byte>(inFile_.data.size());
+                header[25] = static_cast<Byte>(inFile_.data.size() >> 8);
+            }
+            for (std::size_t i = 0; i < 64; ++i) memory_.write(static_cast<Word>(r.de() + i), header[i]);
+            r.setHl(r.de());  // the header lies in the buffer
+            r.setDe(inFile_.load);
+            r.setBc(static_cast<Word>(inFile_.data.size()));
+            r.main[7] = inFile_.type;
+            setCarryZero(r, true, false);
+            log("open " + t, inFile_.load, inFile_.data.size());
+            return finish();
+        }
+        log("open " + fname + ": not found", 0, 0);
+        r.main[7] = 0x92;  // file not found
+        setCarryZero(r, false, false);
+        return finish();
+    }
+    if (name == "CAS_IN_DIRECT") {
+        if (!inFile_.open) {
+            setCarryZero(r, false, false);
+            return finish();
+        }
+        for (std::size_t i = 0; i < inFile_.data.size(); ++i) memory_.write(static_cast<Word>(r.hl() + i), inFile_.data[i]);
+        log("load " + inFile_.name, r.hl(), inFile_.data.size());
+        inFile_.pos = inFile_.data.size();
+        r.setHl(inFile_.entry);
+        setCarryZero(r, true, false);
+        return finish();
+    }
+    if (name == "CAS_IN_CHAR") {
+        if (!inFile_.open || inFile_.pos >= inFile_.data.size()) {
+            r.main[7] = 0x1A;  // end of file
+            setCarryZero(r, false, false);
+        } else {
+            r.main[7] = inFile_.data[inFile_.pos++];
+            setCarryZero(r, true, false);
+        }
+        return finish();
+    }
+    if (name == "WRITE_SECTOR") {
+        // HL = buffer, E = drive, D = track, C = sector ID: written into the inserted image (save_disk writes it to a file)
+        const Byte track = r.main[2], id = r.main[1];
+        const auto* sec = disk_->sector(track, id);
+        if (!sec) {
+            log("write sector " + std::to_string(track) + "/&" + hexDigits(id, 2) + " missing", r.hl(), 0);
+            r.main[7] = 0x20;
+            setCarryZero(r, false, false);
+            return finish();
+        }
+        std::vector<Byte> data(sec->data.size());
+        for (std::size_t i = 0; i < data.size(); ++i) data[i] = memory_.read(static_cast<Word>(r.hl() + i));
+        disk_->writeSector(track, id, data);
+        log("write sector " + std::to_string(track) + "/&" + hexDigits(id, 2), r.hl(), data.size());
+        setCarryZero(r, true, false);
+        return finish();
+    }
+    if (name == "CAS_IN_CLOSE" || name == "CAS_IN_ABANDON") {
+        inFile_.open = false;
+        setCarryZero(r, true, false);
+        return finish();
+    }
+    return false;
+}
+
+bool Session::biosCommand(Cpu& cpu, unsigned command) {
+    Registers& r = cpu.regs();
+    switch (command) {
+        case 0x84: return diskStub(cpu, "READ_SECTOR");
+        case 0x85: return diskStub(cpu, "WRITE_SECTOR");
+        default: break;
+    }
+    // &81 set message, &82 setup disc, &83 select format, &86 format track, &87 move track, &88 drive status, &89 retry count:
+    // nothing to do for an image; success
+    const Word ret = static_cast<Word>(memory_.read(r.sp) | (memory_.read(static_cast<Word>(r.sp + 1)) << 8));
+    diskLog_.push_back({"bios &" + hexDigits(command, 2), r.hl(), 0, static_cast<Word>(ret - 3)});
+    while (diskLog_.size() > 256) diskLog_.pop_front();
+    if (command == 0x88) r.main[7] = 0x20;  // drive status: ready
+    r.main[6] = static_cast<Byte>(r.f() | 0x01);
+    r.sp = static_cast<Word>(r.sp + 2);
+    r.pc = ret;
     return true;
 }
 
@@ -184,7 +512,26 @@ Json Session::Impl::cmdAnalyze() {
     {
         const Annotations* ann = &s.ann_;
         const std::vector<std::uint8_t>* tables = &s.tableBytes_;
-        s.dis_->setDataBarrier([ann, tables](Word a) { return (*tables)[a] != 0 || ann->dataCovering(a) != nullptr; });
+        // on a CPC the firmware jump block is not part of the program: calls into it are not followed
+        const bool cpc = s.cpc_;
+        s.dis_->setDataBarrier([ann, tables, cpc](Word a) {
+            return (*tables)[a] != 0 || ann->dataCovering(a) != nullptr || (cpc && a >= 0xB900 && a <= 0xBDFF);
+        });
+    }
+    if (const Json* inl = req.find("inline_words"); inl && inl->isArray()) {
+        // CALL/RST targets followed by one inline address, e.g. "0x18": RST &18 is the CPC firmware's FAR CALL
+        for (const Json& e : inl->items()) s.dis_->addInlineData(address(e, "inline_words"), InlineDataKind::Word);
+    }
+    if (const Json* args = req.find("inline_control_args"); args && args->isObject()) {
+        // {"0x1F": 2, "0x1E": 1}: control codes in inline strings and the number of argument bytes behind them
+        std::map<Byte, unsigned> m;
+        for (const auto& [k, v] : args->members()) {
+            const Json key(k);
+            const Word code = address(key, "inline_control_args");
+            if (code > 0xFF || !v.isNumber() || v.asInt() < 0 || v.asInt() > 8) throw SessionError("inline_control_args: {\"code\": 0-8}");
+            m[static_cast<Byte>(code)] = static_cast<unsigned>(v.asInt());
+        }
+        s.dis_->setInlineControlArguments(std::move(m));
     }
     if (const Json* inl = req.find("inline_strings"); inl && inl->isArray()) {
         const std::string kind = req.find("inline_kind") && req.find("inline_kind")->isString() ? req.find("inline_kind")->asString() : "bit7";
@@ -666,7 +1013,11 @@ Json Session::Impl::cmdScreen(const std::string& cmd) {
     if (!s.cpc_) throw SessionError("not a CPC machine (use machine or load_sna first)");
     cpc::RenderOptions options;
     options.border = flag("border", false);
-    const IndexedImage current = cpc::renderScreen(s.memory_, s.video_, options);
+    // with mode or ink changes during the last frame (raster splits) every line shows the state it was displayed with
+    const auto [rasterStart, rasterChanges] = s.lastFrameRaster();
+    const bool raster = flag("raster", true) && !rasterChanges.empty();
+    const IndexedImage current = raster ? cpc::renderScreenRaster(s.memory_, rasterStart, rasterChanges, options)
+                                        : cpc::renderScreen(s.memory_, s.video_, options);
 
     if (cmd == "screen") {
         const std::string name = req.find("name") && req.find("name")->isString() ? req.find("name")->asString() : "last";
@@ -688,6 +1039,15 @@ Json Session::Impl::cmdScreen(const std::string& cmd) {
             j.set("crop", true).set("zoom", zoom);
         }
         j.set("name", name).set("mode", s.video_.mode).set("width", shown.width).set("height", shown.height);
+        if (raster) {
+            Json splits = Json::array();
+            for (const auto& c : rasterChanges) {
+                Json e = Json::object();
+                e.set("line", c.line).set("mode", c.video.mode);
+                splits.push(std::move(e));
+            }
+            j.set("raster_splits", splits).set("top_mode", rasterStart.mode);
+        }
         j.set("png_base64", base64Encode(encodePng(shown)));
         return j;
     }
@@ -752,6 +1112,96 @@ bool Session::Impl::analysisCommand(const std::string& cmd, Json& result) {
         result = Json::object();
         result.set("calls", list);
         if (flag("clear", false)) s.firmwareLog_.clear();
+    } else if (cmd == "insert_disk") {
+        // a .dsk for the firmware stubs: CAS_IN_* read its files, KL_FIND_COMMAND &84 / READ SECTOR its sectors
+        requireFiles();
+        if (!s.cpc_) throw SessionError("not a CPC machine (use machine first)");
+        try {
+            s.disk_ = std::make_unique<DskImage>(DskImage::parse(readFile(text("file"))));
+        } catch (const DskError& e) {
+            throw SessionError(e.what());
+        }
+        s.inFile_ = {};
+        result = Json::object();
+        result.set("format", s.disk_->format()).set("files", s.disk_->files().size());
+    } else if (cmd == "save_disk") {
+        requireFiles();
+        if (!s.disk_) throw SessionError("no disk inserted");
+        writeFile(text("file"), s.disk_->serialize());
+        result = Json::object();
+    } else if (cmd == "coverage") {
+        // the start addresses of executed instructions: they tell code from data, also code the analysis cannot reach
+        if (req.find("on")) {
+            if (flag("on", true)) {
+                if (s.coverage_.empty()) s.coverage_.assign(0x10000, 0);
+            } else {
+                s.coverage_.clear();
+            }
+        }
+        Json ranges = Json::array();
+        std::size_t count = 0;
+        if (!s.coverage_.empty()) {
+            const unsigned from = static_cast<unsigned>(integer("from", 0, 0, 0xFFFF));
+            const unsigned to = static_cast<unsigned>(integer("to", 0xFFFF, 0, 0xFFFF));
+            // runs of instructions with gaps of at most 3 bytes (the rest of an instruction) form a range
+            std::optional<unsigned> start;
+            unsigned last = 0;
+            auto close = [&] {
+                if (!start) return;
+                Json e = Json::array();
+                e.push(hex16(static_cast<Word>(*start)));
+                e.push(hex16(static_cast<Word>(last)));
+                ranges.push(std::move(e));
+                start.reset();
+            };
+            for (unsigned a = from; a <= to; ++a) {
+                if (!s.coverage_[a]) continue;
+                ++count;
+                if (start && a - last > 4) close();
+                if (!start) start = a;
+                last = a;
+            }
+            close();
+        }
+        result = Json::object();
+        result.set("on", !s.coverage_.empty()).set("instructions", count).set("ranges", ranges);
+        if (flag("addresses", false) && !s.coverage_.empty()) {
+            // every executed instruction address (good entry points for analyze: also code reached only through vectors)
+            Json all = Json::array();
+            const unsigned from = static_cast<unsigned>(integer("from", 0, 0, 0xFFFF));
+            const unsigned to = static_cast<unsigned>(integer("to", 0xFFFF, 0, 0xFFFF));
+            for (unsigned a = from; a <= to; ++a) {
+                if (s.coverage_[a]) all.push(hex16(static_cast<Word>(a)));
+            }
+            result.set("addresses", all);
+        }
+        if (flag("clear", false) && !s.coverage_.empty()) std::fill(s.coverage_.begin(), s.coverage_.end(), Byte{0});
+    } else if (cmd == "controls") {
+        // joystick and keys as the program sees them (firmware KM_* and the keyboard matrix behind PSG register 14)
+        if (req.find("joystick")) s.joystick_ = static_cast<Byte>(integer("joystick", 0, 0, 255));
+        if (req.find("joystick2")) s.joystick2_ = static_cast<Byte>(integer("joystick2", 0, 0, 255));
+        if (const Json* k = req.find("keys"); k && k->isArray()) {
+            s.keysDown_.clear();
+            for (const Json& key : k->items()) {
+                const std::int64_t n = value(key, "keys");
+                if (n < 0 || n > 79) throw SessionError("key numbers are 0-79");
+                s.keysDown_.insert(static_cast<Byte>(n));
+            }
+        }
+        result = Json::object();
+        Json keys = Json::array();
+        for (Byte k : s.keysDown_) keys.push(static_cast<std::int64_t>(k));
+        result.set("joystick", s.joystick_).set("joystick2", s.joystick2_).set("keys", keys);
+    } else if (cmd == "disk_log") {
+        Json list = Json::array();
+        for (const auto& e : s.diskLog_) {
+            Json j = Json::object();
+            j.set("what", e.what).set("addr", hex16(e.address)).set("bytes", e.bytes).set("call_site", hex16(e.pc));
+            list.push(std::move(j));
+        }
+        result = Json::object();
+        result.set("events", list);
+        if (flag("clear", false)) s.diskLog_.clear();
     } else if (cmd == "console") {
         result = Json::object();
         result.set("text", s.console_);

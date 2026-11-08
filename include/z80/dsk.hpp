@@ -78,6 +78,8 @@ public:
     [[nodiscard]] const std::string& creator() const { return creator_; }
     [[nodiscard]] const Track* track(unsigned number, unsigned side = 0) const;
     [[nodiscard]] const Sector* sector(unsigned track, Byte id, unsigned side = 0) const;
+    /// Overwrites the data of a sector (side 0); false if there is no such sector.
+    bool writeSector(unsigned track, Byte id, std::span<const Byte> data);
 
     /// "data", "system", "ibm" or "" (no AMSDOS format recognised: the first sector ID of track 0 tells).
     [[nodiscard]] std::string format() const;

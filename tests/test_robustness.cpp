@@ -150,10 +150,12 @@ int main() {
                                   "interrupt", "nmi", "io", "input", "reset", "symbols", "help", "info", "machine", "video", "screen", "screen_diff", "screens",
                                   "screen_drop", "firmware_log", "console", "analyze", "routines", "listing", "jump_tables", "data_regions", "references",
                                   "ann_label", "ann_routine", "ann_variable", "ann_data", "ann_comment", "ann_constant", "ann_remove", "ann_title", "ann_list",
-                                  "track_writes", "written", "run_until_unpacked", "save_memory", "load_file", "ann_save", "nonsense"};
+                                  "track_writes", "written", "run_until_unpacked", "save_memory", "load_file", "ann_save", "insert_disk", "disk_log",
+                                  "save_disk", "controls", "coverage", "nonsense"};
         const char* keys[] = {"addr", "count", "len", "hex", "bytes", "regs", "n", "trace", "max_instructions", "max_cycles", "until", "name", "kind",
                               "source", "origin", "entry", "entries", "from", "to", "type", "text", "size", "length", "block", "apply", "min_written",
-                              "continue", "ignore", "order", "max_chars", "irq_every_cycles", "file", "state", "a", "b", "crop", "remove", "on", "tables"};
+                              "continue", "ignore", "order", "max_chars", "irq_every_cycles", "file", "state", "a", "b", "crop", "remove", "on", "tables",
+                              "joystick", "keys", "addresses", "history", "inline_words", "inline_control_args", "raster"};
         auto randomValue = [&](int depth, auto& self) -> z80::Json {
             switch (rng() % 9) {
                 case 0: return z80::Json(nullptr);

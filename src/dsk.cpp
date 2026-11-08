@@ -349,6 +349,13 @@ std::vector<Byte> DskImage::serialize() const {
     return out;
 }
 
+bool DskImage::writeSector(unsigned trackNumber, Byte id, std::span<const Byte> data) {
+    Sector* s = sectorRef(trackNumber, id);
+    if (!s) return false;
+    for (std::size_t i = 0; i < s->data.size(); ++i) s->data[i] = i < data.size() ? data[i] : Byte{0};
+    return true;
+}
+
 DskImage::Sector* DskImage::sectorRef(unsigned trackNumber, Byte id) {
     for (Track& t : trackList_) {
         if (t.number != trackNumber || t.side != 0) continue;

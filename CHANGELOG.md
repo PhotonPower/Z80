@@ -6,6 +6,28 @@ die Versionierung an [Semantic Versioning](https://semver.org/lang/de/).
 
 ## [Unreleased]
 
+### Hinzugefügt (Firmware-Kernel für ganze Spiele, erprobt an SORCERY+)
+- **Virtuelles Laufwerk** (`insert_disk`, `disk_log`, `save_disk`): `CAS_IN_OPEN/DIRECT/CHAR/CLOSE/ABANDON` lesen Dateien einer `.dsk`
+  (ohne Endung wie AMSDOS auch `.BAS`/`.BIN`), `KL_FIND_COMMAND` liefert die Diskbefehle &81-&89, `READ SECTOR`/`WRITE SECTOR` lesen und
+  schreiben beliebige Sektoren (auch kopiergeschützte Spuren), direkt oder per `RST &18` (FAR CALL); `MC_START_PROGRAM`.
+  `DskImage::writeSector`.
+- **Interrupts wie mit der Firmware**: `&0038` → Interrupt-Einsprung der Firmware, Frame-Flyback-Ereignis (`KL_NEW_FRAME_FLY`, Register
+  gesichert), Farbtabelle (`SCR_SET_INK`) wird bei jedem Bildrücklauf zurückgeschrieben; `irq_every_cycles` läuft im Takt der Maschinenzeit
+  (gleichlaufend mit dem Vsync) und `HALT` wartet auf den nächsten Interrupt; `KL_L_ROM_*`/`KL_ROM_RESTORE` enden mit `EI`.
+- **Sprungleiste mit ROM-Adressen** (`RST &08` + Adresse) und ein „Fake-ROM“: Programme, die eine ROM-Adresse aus der Sprungleiste lesen und
+  direkt aufrufen (z. B. `MC WAIT FLYBACK`), landen im Stub; Restart-Block mit PCBC/PCDE/PCHL. `Cpu::setExecHookRange`.
+- **Eingaben** (`controls`): Joystick und Tasten für `KM_GET_JOYSTICK`, `KM_TEST_KEY` und die Tastaturmatrix (PSG-Register 14).
+  Weitere Stubs: `SCR_GET_MODE`, `SCR_GET_INK`, `MC_WAIT_FLYBACK`.
+- **Rasterteilung im Screenshot**: Modus- und Farbwechsel mitten im Bild werden mit ihrer Bildzeile aufgezeichnet; `screen` zeichnet jede
+  Zeile mit ihrem Zustand (`raster_splits`, `cpc::renderScreenRaster`).
+- **`coverage`**: ausgeführte Befehlsadressen (Strecken oder alle), als Einsprungpunkte für die Analyse; **`history:n`** bei `run` und Co.
+- **Analyse**: `inline_words` (Adresse hinter `RST &18`/`CALL`, im Listing als `DW name`), `inline_control_args` (Steuercodes mit
+  Argumentbytes in Inline-Texten); die Firmware-Sprungleiste ist auf dem CPC kein Teil des Programms.
+
+### Behoben
+- `MC_SET_INKS`-Stub las HL statt DE und ohne den Rand als erstes Byte.
+- CRTC-Voreinstellung ohne R3/R4/R7 (Bildposition für Rasterteilungen falsch).
+
 ### Hinzugefügt (Abgleich mit dem Schwesterprojekt [MC68000](https://github.com/PhotonPower/MC68000))
 - **Sprungtabellen** (`z80/analysis.hpp`, Befehl `jump_tables`, Feld `jump_tables` in `analyze`): Adresstabellen hinter einem Verteiler
   (`LD HL,tab` … `LD E,(HL)` / `INC HL` / `LD D,(HL)` / `EX DE,HL` / `JP (HL)`, auch `JP (IX)`/`JP (IY)` und `PUSH rr`/`RET`) und Reihen von `JP nn`,

@@ -173,9 +173,20 @@ struct Session::Impl {
         std::uint64_t count = 0;
         Word first = 0;
         bool stubs = false;  // the firmware jump block is handled by the stubs: its zeros are not empty memory
-        explicit EmptyFetchGuard(Cpu& c, bool firmwareStubs = false) : cpu(c), stubs(firmwareStubs) {
+        std::vector<Word> history;   // the last `keep` instruction addresses (request "history")
+        std::size_t keep = 0, next = 0;
+        std::vector<Byte>* coverage = nullptr;  // the session's coverage map, if on
+        explicit EmptyFetchGuard(Cpu& c, bool firmwareStubs = false, std::size_t historySize = 0, std::vector<Byte>* cov = nullptr)
+            : cpu(c), stubs(firmwareStubs), keep(historySize), coverage(cov && !cov->empty() ? cov : nullptr) {
+            history.reserve(keep);
             cpu.setTrace([this](const Cpu& z) {
                 const Word pc = z.regs().pc;
+                if (coverage) (*coverage)[pc] = 1;
+                if (keep) {
+                    if (history.size() < keep) history.push_back(pc);
+                    else history[next] = pc;
+                    next = (next + 1) % keep;
+                }
                 if (stubs && pc >= 0xB900 && pc <= 0xBDFF) return;
                 for (unsigned i = 0; i < 8; ++i) {
                     if (z.memory().read(static_cast<Word>(pc + i)) != 0) return;
@@ -187,6 +198,12 @@ struct Session::Impl {
         EmptyFetchGuard(const EmptyFetchGuard&) = delete;
         EmptyFetchGuard& operator=(const EmptyFetchGuard&) = delete;
         void report(Json& j) const {
+            if (keep && !history.empty()) {
+                Json h = Json::array();
+                const std::size_t n = history.size();
+                for (std::size_t i = 0; i < n; ++i) h.push(hex16(history[(next + i) % n]));  // oldest first
+                j.set("history", h);
+            }
             if (count == 0) return;
             j.set("fetched_from_empty_memory", count).set("first_empty_fetch", hex16(first));
         }
@@ -202,9 +219,20 @@ struct Session::Impl {
         std::uint64_t remaining = l.maxInstructions;
         for (;;) {
             RunLimits slice;
-            slice.maxCycles = irq;
+            // interrupts come at fixed points of the machine's time (on a CPC: in step with the vertical sync), however the runs are cut
+            const std::uint64_t phase = s.cpu_.cycles() % irq;
+            slice.maxCycles = irq - phase;
             slice.maxInstructions = remaining;
-            const RunResult r = until ? s.cpu_.runUntil(*until, slice) : s.cpu_.run(slice);
+            RunResult r = until ? s.cpu_.runUntil(*until, slice) : s.cpu_.run(slice);
+            if (r.reason == StopReason::Halted && s.cpu_.regs().iff1) {
+                // HALT with interrupts enabled waits for the next one: the CPU idles to the end of the slice
+                CpuState st = s.cpu_.state();
+                const std::uint64_t idle = slice.maxCycles > r.cycles ? slice.maxCycles - r.cycles : 0;
+                st.cycles += idle;
+                s.cpu_.setState(st);
+                r.cycles += idle;
+                r.reason = StopReason::CycleLimit;
+            }
             total.instructions += r.instructions;
             total.cycles += r.cycles;
             total.reason = r.reason;
@@ -230,6 +258,7 @@ struct Session::Impl {
     }
 
     bool stubsActive() const { return s.cpc_ && !s.memory_.hasLowRom(); }
+    std::size_t historySize() const { return static_cast<std::size_t>(integer("history", 0, 0, 10000)); }
 
     void requireFiles() const {
         if (!s.options_.allowFiles) throw SessionError("file access is disabled (start the server with --allow-files)");
@@ -369,7 +398,7 @@ struct Session::Impl {
 
     Json cmdStep() {
         const int n = static_cast<int>(integer("n", 1, 1, 1'000'000));
-        EmptyFetchGuard guard(s.cpu_, stubsActive());
+        EmptyFetchGuard guard(s.cpu_, stubsActive(), historySize(), &s.coverage_);
         const bool trace = flag("trace", false);
         if (trace && n > 1000) throw SessionError("trace is limited to 1000 steps");
         Json traceLines = Json::array();
@@ -409,7 +438,7 @@ struct Session::Impl {
         const Word spAfterReturn = static_cast<Word>(r.sp + 2);
         r.pc = target;
         r.halted = false;
-        EmptyFetchGuard guard(s.cpu_, stubsActive());
+        EmptyFetchGuard guard(s.cpu_, stubsActive(), historySize(), &s.coverage_);
         const RunResult res = runCommand(sentinel);
         Json j = runJson(res);
         // only the return address *with* the stack pointer from before the call counts: a jump through a pointer that is still 0
@@ -512,7 +541,7 @@ struct Session::Impl {
             }
         }
         if (s.cpc_ && !s.memory_.hasLowRom()) ignore.emplace_back(0xB900, 0xBE00);  // the firmware jump block of the stubs never counts
-        EmptyFetchGuard guard(s.cpu_, stubsActive());
+        EmptyFetchGuard guard(s.cpu_, stubsActive(), historySize(), &s.coverage_);
         s.cpu_.watchWrittenCode(true, minWritten, ignore);
         RunResult r;
         try {
@@ -553,7 +582,7 @@ struct Session::Impl {
             {"step", "execute {n?, trace?} instructions"},
             {"step_over", "execute one instruction; run through a CALL"},
             {"run", "run {max_instructions?, max_cycles?, until?} until breakpoint/limit/halt"},
-            {"run_until_return", "run until the current routine returns"},
+            {"run_until_return", "run until the current routine returns (run, step, call ...: history:n returns the last n instruction addresses)"},
             {"track_writes", "remember which bytes the program writes {on?, clear?}"},
             {"written", "the largest written ranges since track_writes {min_length?, limit?}"},
             {"run_until_unpacked", "run until code is fetched from a written range of at least min_written bytes {min_written?, continue?, ignore?, max_instructions?}"},
@@ -581,7 +610,12 @@ struct Session::Impl {
             {"screen_drop", "delete a stored screen {name}"},
             {"firmware_log", "calls to firmware jump block entries seen while stubbed {clear?}"},
             {"console", "text printed through TXT_OUTPUT while stubbed {clear?}"},
-            {"analyze", "analyse code flow {entries[], from?, to? (the program), inline_strings[], tables?: false}"},
+            {"insert_disk", "a .dsk for the firmware stubs: CAS_IN_OPEN/DIRECT/CHAR/CLOSE read its files, the disc command READ SECTOR (&84, via KL_FIND_COMMAND) its sectors {file} (needs --allow-files)"},
+            {"disk_log", "what was read from the inserted disk, and by which CALL {clear?}"},
+            {"coverage", "where instructions were executed {on?, clear?, from?, to?, addresses?: true lists every executed instruction address} -> ranges of executed instruction addresses"},
+            {"controls", "joystick and keys as the program sees them {joystick?: bits 0 up 1 down 2 left 3 right 4 fire2 5 fire1, joystick2?, keys?: [0-79]}"},
+            {"save_disk", "write the inserted disk (with what the program wrote to it) to a file {file} (needs --allow-files)"},
+            {"analyze", "analyse code flow {entries[], from?, to? (the program), inline_strings[], inline_words[] (CALL/RST targets followed by an address, e.g. \"0x18\"), inline_control_args?: {\"0x1F\": 2} (argument bytes of control codes in inline strings), tables?: false}"},
             {"routines", "list subroutines {order?: bottom_up|address, undocumented_only?}"},
             {"listing", "annotated, re-assemblable listing {from?, to?, verify?, max_chars?}"},
             {"ann_label", "name an address {addr, name}"}, {"ann_routine", "document a routine {addr, name, summary, inputs?, outputs?, clobbers?}"},
@@ -617,7 +651,7 @@ struct Session::Impl {
         if (cmd == "set") return cmdSet();
         if (cmd == "step") return cmdStep();
         if (cmd == "step_over" || cmd == "run" || cmd == "run_until_return") {
-            EmptyFetchGuard guard(cpu, stubsActive());
+            EmptyFetchGuard guard(cpu, stubsActive(), historySize(), &s.coverage_);
             Json out;
             if (cmd == "step_over") out = runJson(cpu.stepOver(limits()));
             else if (cmd == "run_until_return") out = runJson(cpu.runUntilReturn(limits()));

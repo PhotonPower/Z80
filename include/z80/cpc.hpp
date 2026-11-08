@@ -76,6 +76,18 @@ struct RenderOptions {
 /// them), every scan line doubled vertically. Flashing inks are shown in their first colour.
 IndexedImage renderScreen(const Memory& memory, const VideoState& video, const RenderOptions& options = {});
 
+/// A mode or ink change during a frame (a "raster split"): from display line `line` (0 = the first line of the picture) on, `video`
+/// applies.
+struct RasterChange {
+    int line = 0;
+    VideoState video;
+};
+
+/// Like renderScreen, but every scan line is drawn with the state in effect while it was displayed: `start` at the top of the frame, then
+/// the changes in their order. The palette holds the 32 hardware colours (pixels are hardware colour numbers).
+IndexedImage renderScreenRaster(const Memory& memory, const VideoState& start, const std::vector<RasterChange>& changes,
+                                const RenderOptions& options = {});
+
 /// Cuts out the pixel box [x0,x1] x [y0,y1] (clamped to the image) and enlarges it by an integer
 /// factor (nearest neighbour), so that small details become visible to a human or a vision model.
 IndexedImage cropAndZoom(const IndexedImage& image, int x0, int y0, int x1, int y1, int zoom);

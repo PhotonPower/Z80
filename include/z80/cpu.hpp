@@ -212,6 +212,11 @@ public:
         hook_ = std::move(hook);
     }
     void clearExecHook() { hook_ = nullptr; }
+    /// Changes only the range of the hook (safe to call from inside the hook).
+    void setExecHookRange(Word first, Word last) {
+        hookFirst_ = first;
+        hookLast_ = last;
+    }
 
     void setPortHandlers(PortIn in, PortOut out) {
         portIn_ = std::move(in);

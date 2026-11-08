@@ -93,6 +93,13 @@ private:
             // a marked constant is a number, not an address: no label for it
             if (dis_.isInstructionStart(static_cast<Word>(a)) && !ann_.isConstant(static_cast<Word>(a))) decode(ram_, static_cast<Word>(a), options);
         }
+        // the inline words behind RST &18 (FAR CALL) point at far addresses
+        for (std::size_t a = from_; a + 1 <= to_; ++a) {
+            if (inlineWordAt(static_cast<Word>(a))) {
+                const Word v = ram_.read16(static_cast<Word>(a));
+                if (nameable(v) && !dis_.isCovered(v) && !ann_.expressionFor(v)) dataRefs_.insert(v);
+            }
+        }
         // the entries of a pointer table point at something that deserves a name (strings, code)
         for (const auto& [start, region] : ann_.dataRegions()) {
             if (region.kind != DataKind::Pointers) continue;
@@ -101,6 +108,18 @@ private:
                 if (nameable(v) && !dis_.isCovered(v) && !ann_.expressionFor(v)) dataRefs_.insert(v);
             }
         }
+    }
+    /// True if `a` holds the inline word behind a CALL or RST whose target takes one (and the 2 bytes are not split by code).
+    bool inlineWordAt(Word a) const {
+        for (Word len : {Word{1}, Word{3}}) {  // RST n is 1 byte, CALL nn 3
+            const auto at = static_cast<Word>(a - len);
+            if (!dis_.isInstructionStart(at)) continue;
+            const Instruction ins = decode(ram_, at, {});
+            if (ins.length != len || !ins.target) continue;
+            if (ins.flow != FlowKind::Restart && ins.flow != FlowKind::Call && ins.flow != FlowKind::ConditionalCall) continue;
+            if (dis_.inlineDataFor(*ins.target) == InlineDataKind::Word) return !dis_.isInstructionStart(static_cast<Word>(a + 1));
+        }
+        return false;
     }
     /// Label that is *defined* at `a` inside the listing (primary name).
     std::optional<std::string> labelAt(Word a) const {
@@ -578,6 +597,19 @@ ListingResult Builder::build() {
                 a += lines_.back().length;
                 continue;
             }
+        }
+        if (dis_.isCovered(address) && !dis_.isInstructionStart(address) && inlineWordAt(address)) {
+            // the address behind RST &18 (FAR CALL) and the like
+            Line line;
+            line.address = address;
+            line.before = headerFor(address);
+            if (auto label = labelAt(address)) line.before.push_back(*label + ":");
+            if (const std::string* c = ann_.commentAt(address)) line.comment = *c;
+            line.code = "DW " + wordText(ram_.read16(address));
+            line.length = 2;
+            lines_.push_back(std::move(line));
+            a += 2;
+            continue;
         }
         if (dis_.isCovered(address) && !dis_.isInstructionStart(address)) {
             // inline data behind a CALL (a text the called routine prints): shown as text when it reads like one

@@ -139,15 +139,23 @@ std::optional<Instruction> Disassembler::decodeAndMark(Word address, Word& nextA
         }
     }
 
-    // Inline data after a CALL (e.g. a "print string" routine followed by its text).
-    if ((ins.flow == FlowKind::Call || ins.flow == FlowKind::ConditionalCall) && ins.target) {
-        if (auto it = inlineData_.find(*ins.target); it != inlineData_.end()) {
+    // Inline data after a CALL (e.g. a "print string" routine followed by its text) or a restart (RST &18 + a far address).
+    if ((ins.flow == FlowKind::Call || ins.flow == FlowKind::ConditionalCall || ins.flow == FlowKind::Restart) && ins.target) {
+        if (auto it = inlineData_.find(*ins.target); it != inlineData_.end() && it->second == InlineDataKind::Word) {
+            markRange(nextAddress, 2, false);
+            nextAddress = static_cast<Word>(nextAddress + 2);
+        } else if (it != inlineData_.end() && ins.flow != FlowKind::Restart) {
             std::size_t count = 0;
             auto a = static_cast<Word>(nextAddress);
             while (count < 256) {
                 const Byte b = memory_.read(a);
                 ++count;
                 a = static_cast<Word>(a + 1);
+                if (auto arg = inlineArgs_.find(b); arg != inlineArgs_.end()) {  // a control code: its arguments are part of the string
+                    count += arg->second;
+                    a = static_cast<Word>(a + arg->second);
+                    continue;
+                }
                 if (it->second == InlineDataKind::StringBit7 && (b & 0x80) != 0) break;
                 if (it->second == InlineDataKind::StringZero && b == 0) break;
             }
@@ -213,8 +221,14 @@ void Disassembler::analyzeFlow(Word entry) {
                 case FlowKind::Jump:
                     pc = *ins.target;
                     break;
-                case FlowKind::Return:
                 case FlowKind::Restart:
+                    // a restart with an inline word returns behind it (RST &18: FAR CALL)
+                    if (ins.target && inlineData_.count(*ins.target) && inlineData_.at(*ins.target) == InlineDataKind::Word) {
+                        pc = next;
+                        break;
+                    }
+                    return;
+                case FlowKind::Return:
                 case FlowKind::JumpIndirect:
                     return;
                 case FlowKind::Sequential:

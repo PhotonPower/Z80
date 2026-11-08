@@ -13,6 +13,7 @@
 #include "z80/cpc.hpp"
 #include "z80/cpu.hpp"
 #include "z80/disassembler.hpp"
+#include "z80/dsk.hpp"
 #include "z80/json.hpp"
 #include "z80/memory.hpp"
 #include "z80/snapshot.hpp"
@@ -88,6 +89,57 @@ private:
     std::map<std::string, IndexedImage> screens_;
     std::deque<FirmwareCall> firmwareLog_;
     std::string console_;                 ///< characters passed to TXT_OUTPUT while stubbed
+    // ---- a virtual disc drive for the firmware stubs (insert_disk): AMSDOS file reading and the READ SECTOR command ----
+    std::unique_ptr<DskImage> disk_;
+    struct InFile {
+        bool open = false;
+        std::string name;
+        std::vector<Byte> data;  ///< without the AMSDOS header
+        std::size_t pos = 0;
+        Word load = 0, entry = 0;
+        Byte type = 0x16;
+    } inFile_;
+    struct DiskEvent {
+        std::string what;   ///< "load NAME.EXT", "sector T/&ID" ...
+        Word address = 0;   ///< where the data went
+        std::size_t bytes = 0;
+        Word pc = 0;        ///< the CALL that asked for it
+    };
+    std::deque<DiskEvent> diskLog_;
+    /// What KL_FIND_COMMAND returns for the disc BIOS commands &81-&89: kBiosEntry + (command - &81); handled by the stubs.
+    static constexpr Word kBiosEntry = 0xBDF0;
+    static constexpr Word kReadSectorEntry = kBiosEntry + 3;
+    /// RST &18 (FAR CALL) is routed here: the stubs install JP kFarCallEntry at &0018 when a disk is inserted.
+    static constexpr Word kFarCallEntry = 0xBDE0;
+    bool biosCommand(Cpu& cpu, unsigned command);
+    // ---- a little firmware kernel for the stubs: interrupts with frame flyback events, joystick and keys ----
+    static constexpr Word kInterruptEntry = 0xB941;  ///< where the firmware's IM 1 handler is (&0038 jumps here)
+    std::optional<Word> frameFlyRoutine_;           ///< registered with KL_NEW_FRAME_FLY: called once per frame
+    std::vector<Registers> eventSaves_;
+    /// The firmware's ink table (SCR_SET_INK / SCR_SET_BORDER, hardware colours): like the real screen pack, the stubs write it to
+    /// the hardware at every frame flyback, so a program can change the inks during a frame (MC_SET_INKS) and get them back.
+    /// Empty until a program sets an ink through the firmware.
+    std::optional<std::array<Byte, 17>> firmwareInks_;
+    /// The jump block entries are "RST &08 + address" as on a real CPC; their addresses point here (entry - &B900 + kFakeRom), into the
+    /// lower ROM. A program that reads an address and calls the ROM directly (with the lower ROM enabled) still reaches the stubs.
+    static constexpr Word kFakeRom = 0x3A00;
+    bool stubLowerRom_ = false;  ///< the program enabled the lower ROM (KL_L_ROM_ENABLE): calls into kFakeRom.. are stubbed
+    void setStubLowerRom(bool on);
+    std::vector<Byte> coverage_;  ///< 64 KiB: 1 where an instruction started (command coverage); empty while off
+    // ---- raster splits: mode and ink changes with the display line they happened on, for the last complete frame ----
+    cpc::VideoState rasterStart_, lastRasterStart_;
+    std::vector<cpc::RasterChange> rasterChanges_, lastRasterChanges_;
+    std::uint64_t rasterFrame_ = ~std::uint64_t{0};
+    void noteVideoChange(const cpc::VideoState& before);
+    /// The state at the top of the last complete frame and the changes during it (none: the picture has one mode and palette).
+    [[nodiscard]] std::pair<cpc::VideoState, std::vector<cpc::RasterChange>> lastFrameRaster() const;             ///< the registers of the interrupted program while an event routine runs
+    Byte joystick_ = 0;                             ///< bits 0 up, 1 down, 2 left, 3 right, 4 fire 2, 5 fire 1 (joystick 0)
+    Byte joystick2_ = 0;
+    std::set<Byte> keysDown_;                       ///< key numbers 0-79 (row * 8 + bit)
+    Byte psgLatch_ = 0, psgRegister_ = 0, ppiC_ = 0;  ///< what the program wrote to PPI ports A and C (PSG access, keyboard row)
+    [[nodiscard]] bool keyDown(unsigned key) const;
+    [[nodiscard]] Byte keyboardRow(unsigned row) const;
+    bool diskStub(Cpu& cpu, const std::string& name);
     void enableCpc();
     void applyRomState();
     void installFirmwareStubs();

@@ -91,7 +91,12 @@ der nie gesetzt wurde, oder eine Routine, die Zustand braucht, den anderer Code 
 | `screens` / `screen_drop` | `name` | gespeicherte Bilder auflisten / löschen |
 | `firmware_log` | `clear?` | abgefangene Firmware-Aufrufe mit Registern und `call_site` (der `CALL`, der dorthin führte) |
 | `console` | `clear?` | über `TXT_OUTPUT` ausgegebener Text (Stubs) |
-| `analyze` | `entries[]`, `from?`+`to?` (das Programm), `inline_strings[]`, `inline_kind?`, `linear?{from,to}`, `reset?`, `tables?` (true) | Codefluss analysieren (nötig für `routines` und `listing`); folgt **Sprungtabellen**, bis nichts Neues mehr auftaucht. Antwort: `instructions`, `jump_tables`, `program` |
+| `insert_disk` | `file` | eine `.dsk` ins virtuelle Laufwerk der Stubs: `CAS_IN_OPEN/DIRECT/CHAR/CLOSE/ABANDON` lesen ihre Dateien (ohne Endung: wie AMSDOS auch `.BAS`, `.BIN`), `KL_FIND_COMMAND` liefert die Diskbefehle &81-&89, `READ SECTOR` (&84) / `WRITE SECTOR` (&85) lesen und schreiben Sektoren – direkt oder per `RST &18` (*braucht `--allow-files`*) |
+| `disk_log` | `clear?` | was vom Laufwerk gelesen wurde (`load NAME`, `sector T/&ID`) und von welchem `CALL` |
+| `save_disk` | `file` | die eingelegte Diskette samt geschriebener Sektoren speichern (*braucht `--allow-files`*) |
+| `controls` | `joystick?`, `joystick2?` (Bits 0 hoch, 1 runter, 2 links, 3 rechts, 4/5 Feuer), `keys?` (Tastennummern 0-79) | was das Programm als Joystick und Tasten sieht: `KM_GET_JOYSTICK`, `KM_TEST_KEY` und die Tastaturmatrix hinter PSG-Register 14 |
+| `coverage` | `on?`, `clear?`, `from?`, `to?`, `addresses?` | wo Befehle ausgeführt wurden: `ranges` (zusammenhängende Strecken), mit `addresses:true` jede Befehlsadresse – gute Einsprungpunkte für `analyze`, auch für Code, den nur Vektoren erreichen |
+| `analyze` | `entries[]`, `from?`+`to?` (das Programm), `inline_strings[]`, `inline_kind?`, `inline_control_args?` (`{"0x1F":2}`: Steuercodes in Inline-Texten und ihre Argumentbytes), `inline_words[]` (Ziele von `CALL`/`RST`, hinter denen eine Adresse steht, z. B. `"0x18"` für FAR CALL), `linear?{from,to}`, `reset?`, `tables?` (true) | Codefluss analysieren (nötig für `routines` und `listing`); folgt **Sprungtabellen**, bis nichts Neues mehr auftaucht. Antwort: `instructions`, `jump_tables`, `program` |
 | `routines` | `order?` (`bottom_up`, `address`), `undocumented_only?` | Unterprogramme: `start`, `end`, `blocks` (der eigene Code als Bereiche), `size`, `bytes`, `instructions`, `callers` (auch Tail-Calls), `calls`, `depth`, `via_table` (Fall einer Sprungtabelle), bei dokumentierten auch `summary`/`inputs`/`outputs`/`clobbers`/`confidence`; `external_calls` (Firmware/nicht analysiert) |
 | `jump_tables` | `max_entries?` (64) | gefundene Sprungtabellen: `kind` (`jump_row`, `pointers`), `jump`, `table`, `bytes`, `followed`, `how`, `entries:[{slot,target,name?}]`; nicht verfolgte (`followed:false`) sind Vorschläge mit `hint` |
 | `data_regions` | `apply?` | Vorschläge für Daten: `text`, `pointers` (Tabellen von String-Zeigern), `words` (Zahlentabellen, 16-Bit-Variablen), `zeros`; je mit `reason`, `preview`; `apply:true` trägt sie (außer `zeros`) als Datenbereiche ein |
@@ -102,7 +107,10 @@ der nie gesetzt wurde, oder eine Routine, die Zustand braucht, den anderer Code 
 | `ann_remove` | `addr` | nimmt Name, Routinendoku, Variable, **Datenbereich**, Kommentar und Konstanten-Markierung an `addr` zurück |
 | `ann_save` / `ann_load` | `file` | Annotationen als JSON speichern / laden (*braucht `--allow-files`*) |
 
-`run` und `call` akzeptieren zusätzlich `irq_every_cycles` (Interrupt alle n T-States). `read` und `dis`
+`run` und `call` akzeptieren zusätzlich `irq_every_cycles` (Interrupt alle n T-States; im Takt der Maschinenzeit, also mit dem
+Vsync gleichlaufend, und ein `HALT` wartet auf den nächsten) und `history:n` (die letzten n Befehlsadressen in der Antwort).
+`screen` zeichnet jede Zeile mit dem Modus und den Farben, die während ihrer Darstellung galten (`raster_splits`), wenn ein
+Programm sie mitten im Bild umschaltet; `raster:false` schaltet das ab. `read` und `dis`
 zeigen standardmäßig das **RAM**; mit `"view":"cpu"` sieht man, was die CPU mit eingeblendeten ROMs sieht.
 `io` liefert je Schreibzugriff `pc` (Adresse des schreibenden `OUT`-Befehls) und bei CPC-Maschinen ein Feld `what` mit der
 Wirkung des Zugriffs. `ann_comment` lehnt Adressen **mitten in einem Befehl** mit Erklärung ab (der Kommentar würde nie erscheinen);
