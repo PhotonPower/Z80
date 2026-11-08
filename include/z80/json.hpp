@@ -42,7 +42,12 @@ public:
     [[nodiscard]] bool isObject() const { return type_ == Type::Object; }
 
     [[nodiscard]] bool asBool() const { return bool_; }
-    [[nodiscard]] std::int64_t asInt() const { return isInt_ ? int_ : static_cast<std::int64_t>(num_); }
+    [[nodiscard]] std::int64_t asInt() const {
+        if (isInt_) return int_;
+        // a double outside the int64 range (1e300, NaN) must not reach the cast: that is undefined behaviour
+        if (!(num_ > -9.2e18 && num_ < 9.2e18)) return num_ > 0 ? INT64_MAX : (num_ < 0 ? INT64_MIN : 0);
+        return static_cast<std::int64_t>(num_);
+    }
     [[nodiscard]] double asDouble() const { return num_; }
     [[nodiscard]] const std::string& asString() const { return str_; }
     [[nodiscard]] const std::vector<Json>& items() const { return items_; }

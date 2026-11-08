@@ -45,6 +45,9 @@ struct AssemblerOptions {
     /// Symbols that exist before the first line (e.g. labels of an already loaded program).
     /// Source lines may use them; defining a label of the same name overrides it.
     std::map<std::string, std::int64_t> predefined;
+    /// Optimisation (-O): `JP nn` and `JP NZ/Z/NC/C,nn` become `JR` when the target is in reach (2 bytes instead of 3, same effect;
+    /// only the T-states differ). A decision for JR is only taken back once (if the target moves out of reach), so the passes end.
+    bool optimize = false;
 };
 
 struct AssemblyResult {

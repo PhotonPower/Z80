@@ -22,8 +22,11 @@ Adressen und Zahlen dürfen in allen Schreibweisen des Assemblers angegeben werd
 | `-l <Datei\|->`   | Listing schreiben (`-` = Standardausgabe)                                      |
 | `-s <Datei\|->`   | Symboltabelle schreiben                                                        |
 | `--org <Adresse>` | Startadresse vor dem ersten `ORG` (Standard `0`)                               |
+| `--amsdos <Datei>`| Binary mit **AMSDOS-Kopf** schreiben (Ladeadresse = niedrigste Adresse), so wie es eine CPC-Diskette enthält |
+| `--exec <Adresse>`| Einsprungadresse im AMSDOS-Kopf (Standard: die Ladeadresse)                     |
+| `-O`              | Optimierung: `JP`/`JP NZ,Z,NC,C` → `JR`, wo das Ziel in Reichweite ist ([assembler-syntax.md](assembler-syntax.md#optimierung--o)) |
 
-Ohne `-o`, `--hex` und `--sna` entsteht `<quelle>.bin`. Bei Fehlern im Quelltext werden **keine**
+Ohne `-o`, `--hex`, `--sna` und `--amsdos` entsteht `<quelle>.bin`. Bei Fehlern im Quelltext werden **keine**
 Binär-, HEX- oder Snapshot-Dateien geschrieben (Listing und Symboltabelle schon, das hilft bei der
 Fehlersuche). Alle Fehler eines Laufs werden gesammelt auf `stderr` ausgegeben:
 
@@ -38,6 +41,7 @@ Beispiele:
 z80tool asm prog.asm -o prog.bin -l prog.lst -s prog.sym
 z80tool asm prog.asm --sna spiel.sna            # direkt in einen Snapshot patchen
 z80tool asm prog.asm --hex prog.hex
+z80tool asm prog.asm --amsdos PROG.BIN --exec start -O   # mit AMSDOS-Kopf, optimiert
 ```
 
 ## `dis` – Disassembler
@@ -111,3 +115,24 @@ z80tool dis spiel.sna -s 0x05CF --inline-string 0x1B32
 z80tool dis prog.bin --org 0x4000 --asm -o prog.asm
 z80tool asm prog.asm -o prog2.bin && cmp prog.bin prog2.bin
 ```
+
+## `dsk` – CPC-Disk-Abbilder lesen
+
+```sh
+z80tool dsk info    spiel.dsk                  # Standard/Extended, Spuren, Sektor-IDs der Spur 0, AMSDOS-Format, Zahl der Dateien
+z80tool dsk ls      spiel.dsk [-a]             # Verzeichnis mit Größe und AMSDOS-Kopf (Typ, Lade- und Einsprungadresse); -a: auch Systemdateien
+z80tool dsk extract spiel.dsk SPIEL.BIN [-o datei] [--keep-header]   # Datei herauskopieren, ohne AMSDOS-Kopf
+z80tool dsk boot    spiel.dsk [-o boot.bin]    # Bootsektor einer SYSTEM-Diskette (Spur 0, Sektor &41)
+z80tool dsk sector  spiel.dsk 0 0xC1           # ein Sektor als Hexdump mit ID und FDC-Status
+z80tool dsk new     neu.dsk [--format data|system] [--tracks 40]   # leere, formatierte AMSDOS-Diskette
+z80tool dsk put     neu.dsk PROG.BIN [--name NAME.EXT] [--user n] [--system-file] [--read-only]
+```
+
+`put` schreibt die Datei so, wie sie ist (eine gleichnamige wird ersetzt); für ein Programm, das `RUN"PROG"` starten soll, vorher mit
+`asm --amsdos … --exec …` einen AMSDOS-Kopf erzeugen. Der letzte 128-Byte-Record wird wie unter CP/M mit &1A aufgefüllt. Geschrieben wird
+das Standardformat („MV - CPCEMU“), solange alle Spuren gleich groß sind, sonst „EXTENDED CPC DSK“.
+
+Gelesen werden „MV - CPCEMU“- und „EXTENDED CPC DSK“-Abbilder mit dem AMSDOS-Dateisystem in den Formaten DATA (&C1–&C9), SYSTEM/VENDOR (&41–&49)
+und IBM (&01–&08); siehe [formats.md](formats.md#cpc-disk-abbild-dsk). `dis` disassembliert eine Datei direkt von einer Diskette
+(`z80tool dis spiel.dsk --file SPIEL.BIN`); eine Datei mit AMSDOS-Kopf legen `dis`, `monitor` und `load_file` an ihre Ladeadresse, `dis` beginnt
+am Einsprung. `dis` folgt außerdem **Sprungtabellen** ([reverse-engineering.md](reverse-engineering.md#sprungtabellen)).

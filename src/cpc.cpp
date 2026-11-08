@@ -146,7 +146,10 @@ VideoState::VideoState() {
     crtc[0] = 63;
     crtc[1] = 40;
     crtc[2] = 46;
+    crtc[3] = 142;  // the firmware's CRTC setup for a 50 Hz machine
+    crtc[4] = 38;
     crtc[6] = 25;
+    crtc[7] = 30;
     crtc[9] = 7;
     crtc[12] = 0x30;  // screen at &C000
 }
@@ -178,6 +181,7 @@ bool VideoState::writePort(Word port, Byte value) {
 }
 
 Word VideoState::screenBase() const { return static_cast<Word>(((crtc[12] >> 4) & 3) * 0x4000); }
+Word VideoState::screenOffset() const { return static_cast<Word>(((crtc[12] & 3) << 8 | crtc[13]) * 2u); }
 
 // ---- rendering ----------------------------------------------------------------------------------
 
@@ -226,6 +230,62 @@ IndexedImage renderScreen(const Memory& memory, const VideoState& video, const R
             for (std::size_t px = 0; px < line.size(); ++px) {
                 for (int dx = 0; dx < xScale; ++dx) *dst++ = line[px];
             }
+        }
+    }
+    return img;
+}
+
+IndexedImage renderScreenRaster(const Memory& memory, const VideoState& start, const std::vector<RasterChange>& changes,
+                                const RenderOptions& options) {
+    // the geometry comes from the state at the top of the frame; per line only the mode and the inks change
+    const int bytesPerLine = std::max(1, start.crtc[1] * 2);
+    const int rows = std::max(1, static_cast<int>(start.crtc[6]));
+    const int linesPerRow = std::max(1, (start.crtc[9] & 0x1F) + 1);
+    const int scanLines = rows * linesPerRow;
+    const int yScale = 2;
+    const int borderX = options.border ? 32 : 0;
+    const int borderY = options.border ? 32 : 0;
+    const int width = bytesPerLine * 8;  // 640 for 80 bytes, in every mode
+
+    IndexedImage img;
+    img.width = width + 2 * borderX;
+    img.height = scanLines * yScale + 2 * borderY;
+    for (int c = 0; c < 32; ++c) img.palette.push_back(kHardwareColourRgb[c]);
+    img.pixels.assign(static_cast<std::size_t>(img.width) * static_cast<std::size_t>(img.height), start.inks[16] & 0x1F);
+
+    const unsigned offset = ((start.crtc[12] & 3) << 8 | start.crtc[13]) * 2u;
+    const Word base = start.screenBase();
+    std::size_t next = 0;
+    const VideoState* v = &start;
+    std::vector<Byte> line(static_cast<std::size_t>(width));
+    for (int y = 0; y < scanLines; ++y) {
+        while (next < changes.size() && changes[next].line <= y) v = &changes[next++].video;
+        const int mode = v->mode == 3 ? 1 : v->mode;
+        const int pixelsPerByte = mode == 0 ? 2 : mode == 1 ? 4 : 8;
+        const int xScale = 8 / pixelsPerByte;
+        const int row = y / linesPerRow;
+        const int raster = (y % linesPerRow) & 7;
+        for (int x = 0; x < bytesPerLine; ++x) {
+            const unsigned inRow = (offset + static_cast<unsigned>(row * bytesPerLine + x)) & 0x7FF;
+            const Byte b = memory.readRam(static_cast<Word>(base + raster * 0x800 + static_cast<int>(inRow)));
+            Byte pens[8];
+            if (mode == 2) {
+                for (int p = 0; p < 8; ++p) pens[p] = (b >> (7 - p)) & 1;
+            } else if (mode == 1) {
+                for (int p = 0; p < 4; ++p) pens[p] = static_cast<Byte>(((b >> (7 - p)) & 1) | (((b >> (3 - p)) & 1) << 1));
+            } else {
+                pens[0] = static_cast<Byte>(((b >> 7) & 1) | (((b >> 3) & 1) << 1) | (((b >> 5) & 1) << 2) | (((b >> 1) & 1) << 3));
+                pens[1] = static_cast<Byte>(((b >> 6) & 1) | (((b >> 2) & 1) << 1) | (((b >> 4) & 1) << 2) | ((b & 1) << 3));
+            }
+            for (int p = 0; p < pixelsPerByte; ++p) {
+                for (int dx = 0; dx < xScale; ++dx) {
+                    line[static_cast<std::size_t>(x * 8 + p * xScale + dx)] = v->inks[pens[p]] & 0x1F;
+                }
+            }
+        }
+        for (int dy = 0; dy < yScale; ++dy) {
+            auto* dst = img.pixels.data() + static_cast<std::size_t>((borderY + y * yScale + dy) * img.width + borderX);
+            std::copy(line.begin(), line.end(), dst);
         }
     }
     return img;

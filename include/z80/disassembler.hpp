@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <iosfwd>
 #include <map>
 #include <optional>
@@ -16,7 +17,8 @@ namespace z80 {
 /// How the bytes after a CALL to a given routine are to be treated (inline data).
 enum class InlineDataKind {
     StringBit7,  ///< characters up to and including the first byte with bit 7 set
-    StringZero   ///< characters up to and including a 0 byte
+    StringZero,  ///< characters up to and including a 0 byte
+    Word         ///< one 16-bit word (an address), e.g. behind RST &18, the CPC firmware's FAR CALL
 };
 
 struct DisassemblerOptions {
@@ -57,6 +59,17 @@ public:
     void addComment(Word address, std::string text);
     void addEntryPoint(Word address) { entryPoints_.insert(address); }
     void addInlineData(Word callTarget, InlineDataKind kind) { inlineData_[callTarget] = kind; }
+    /// A restart (its target, e.g. 0x08) that works like a CALL in this program: the flow goes on behind the RST and the routine at
+    /// the target is analysed. Without it a restart ends the path (on the CPC the firmware's RST &08 / &28 do not come back).
+    void addCallingRestart(Word target) { callingRestarts_.insert(target); }
+    /// Control codes inside inline strings that are followed by argument bytes (e.g. &1F x y: those bytes never end the string).
+    void setInlineControlArguments(std::map<Byte, unsigned> arguments) { inlineArgs_ = std::move(arguments); }
+    [[nodiscard]] const std::map<Byte, unsigned>& inlineControlArguments() const { return inlineArgs_; }
+    /// The kind of inline data behind a CALL or RST to `target`, if any.
+    [[nodiscard]] std::optional<InlineDataKind> inlineDataFor(Word target) const {
+        const auto it = inlineData_.find(target);
+        return it == inlineData_.end() ? std::nullopt : std::optional<InlineDataKind>(it->second);
+    }
 
     /// Restricts analysis to [first, last]: code outside is never decoded (e.g. the extent of a
     /// raw binary that was loaded into an otherwise empty address space). Default: everything.
@@ -64,6 +77,9 @@ public:
         rangeFirst_ = first;
         rangeLast_ = last;
     }
+
+    /// Bytes for which `isData` returns true are never decoded as code (annotated data regions, jump tables).
+    void setDataBarrier(std::function<bool(Word)> isData) { isData_ = std::move(isData); }
 
     /// Reads "address,text" lines (see docs/formats.md). Returns warnings for bad lines.
     std::vector<std::string> loadComments(std::istream& in);
@@ -113,6 +129,9 @@ private:
     std::map<Word, std::vector<std::string>> comments_;
     std::set<Word> entryPoints_;
     std::map<Word, InlineDataKind> inlineData_;
+    std::set<Word> callingRestarts_;
+    std::map<Byte, unsigned> inlineArgs_;
+    std::function<bool(Word)> isData_;
     std::map<Word, std::set<Word>> callers_;   // call target -> addresses of CALL instructions
     std::map<Word, std::set<Word>> jumpers_;   // jump target -> addresses of JP/JR/DJNZ instructions
 };

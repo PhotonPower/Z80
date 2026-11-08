@@ -2,6 +2,7 @@
 
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -53,10 +54,16 @@ public:
     std::optional<std::string> setData(const DataRegion& region);
     void setComment(Word address, const std::string& text) { comments_[address] = text; }
     void setBlockComment(Word address, const std::string& text) { blockComments_[address] = text; }
+    /// Marks the instruction at `address` as one whose 16-bit immediate is a plain number (a size, a count, a pair of
+    /// bytes), not an address: the listing then neither invents a label for the value nor names it.
+    void setConstant(Word address, bool on) {
+        if (on) constants_.insert(address);
+        else constants_.erase(address);
+    }
     void setTitle(const std::string& title) { title_ = title; }
 
-    bool removeLabel(Word address);       ///< also removes a routine/variable name at that address
-    bool removeComment(Word address);
+    bool removeLabel(Word address);       ///< also removes a routine/variable name and a data region at that address
+    bool removeComment(Word address);     ///< line and block comment, and a constant mark
     void clear();
 
     /// Checks a name without registering it: valid identifier, not reserved, not a platform symbol.
@@ -65,13 +72,15 @@ public:
     // ---- lookups ----
     /// The name given to exactly this address (label, routine or variable), or nullopt.
     [[nodiscard]] std::optional<std::string> nameAt(Word address) const;
-    /// "name" or "name+k" if `address` lies inside a named variable/data region of size > 1.
+    /// "name" or "name+k" if `address` lies inside a named variable/data region of size > 1 (k is hexadecimal from 10 on: "name+&26").
     [[nodiscard]] std::optional<std::string> expressionFor(Word address) const;
     [[nodiscard]] std::optional<Word> addressOf(const std::string& name) const;
     [[nodiscard]] const RoutineDoc* routineAt(Word address) const;
     [[nodiscard]] const std::string* commentAt(Word address) const;
     [[nodiscard]] const std::string* blockCommentAt(Word address) const;
     [[nodiscard]] const DataRegion* dataAt(Word address) const;  ///< region *starting* at address
+    [[nodiscard]] const DataRegion* dataCovering(Word address) const;  ///< region that contains address
+    [[nodiscard]] bool isConstant(Word address) const { return constants_.count(address) != 0; }
 
     [[nodiscard]] const std::map<Word, std::string>& labels() const { return labels_; }
     [[nodiscard]] const std::map<Word, RoutineDoc>& routines() const { return routines_; }
@@ -79,6 +88,7 @@ public:
     [[nodiscard]] const std::map<Word, DataRegion>& dataRegions() const { return data_; }
     [[nodiscard]] const std::map<Word, std::string>& comments() const { return comments_; }
     [[nodiscard]] const std::map<Word, std::string>& blockComments() const { return blockComments_; }
+    [[nodiscard]] const std::set<Word>& constants() const { return constants_; }
     [[nodiscard]] const std::string& title() const { return title_; }
 
     [[nodiscard]] Json toJson() const;
@@ -95,6 +105,7 @@ private:
     std::map<Word, DataRegion> data_;
     std::map<Word, std::string> comments_;
     std::map<Word, std::string> blockComments_;
+    std::set<Word> constants_;                 ///< instructions whose immediate is a number, not an address
     std::string title_;
 };
 

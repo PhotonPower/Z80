@@ -8,6 +8,7 @@
 
 #include "z80/cpc.hpp"
 #include "z80/decoder.hpp"
+#include "z80/dsk.hpp"
 #include "z80/expression.hpp"
 #include "z80/format.hpp"
 #include "z80/image_io.hpp"
@@ -79,6 +80,11 @@ struct Session::Impl {
     Json cmdVideo();
     Json cmdAnalyze();
     Json cmdRoutines();
+    Json cmdJumpTables();
+    Json cmdDataRegions();
+    Json cmdReferences();
+    AnalysisContext analysisContext() const;
+    std::set<Word> routineEntries() const;
     Json cmdListing();
     Json cmdAnnotate(const std::string& cmd);
     Json cmdScreen(const std::string& cmd);
@@ -149,26 +155,84 @@ struct Session::Impl {
         throw SessionError("missing 'hex' or 'bytes'");
     }
 
-    RunLimits limits() const {
+    /// Upper bound for one run: a model must not be able to block the server for hours with a huge limit and an endless loop.
+    static constexpr std::int64_t kMaxInstructions = 100'000'000;
+
+    RunLimits limits(std::int64_t defaultInstructions = 1'000'000) const {
         RunLimits l;
-        l.maxInstructions = static_cast<std::uint64_t>(integer("max_instructions", 1'000'000, 0, 4'000'000'000LL));
-        l.maxCycles = static_cast<std::uint64_t>(integer("max_cycles", 0, 0, 1LL << 50));
+        l.maxInstructions = static_cast<std::uint64_t>(integer("max_instructions", defaultInstructions, 0, kMaxInstructions));
+        l.maxCycles = static_cast<std::uint64_t>(integer("max_cycles", 0, 0, kMaxInstructions * 23));
+        if (l.maxInstructions == 0 && l.maxCycles == 0) throw SessionError("max_instructions 0 (no limit) needs max_cycles");
         return l;
     }
 
+    /// Counts instructions fetched from empty memory (eight zero bytes: a NOP slide through RAM nothing was loaded into) while alive.
+    /// That is nearly always a jump through a pointer that was never set, or a routine that needs state other code sets up first.
+    struct EmptyFetchGuard {
+        Cpu& cpu;
+        std::uint64_t count = 0;
+        Word first = 0;
+        bool stubs = false;  // the firmware jump block is handled by the stubs: its zeros are not empty memory
+        std::vector<Word> history;   // the last `keep` instruction addresses (request "history")
+        std::size_t keep = 0, next = 0;
+        std::vector<Byte>* coverage = nullptr;  // the session's coverage map, if on
+        explicit EmptyFetchGuard(Cpu& c, bool firmwareStubs = false, std::size_t historySize = 0, std::vector<Byte>* cov = nullptr)
+            : cpu(c), stubs(firmwareStubs), keep(historySize), coverage(cov && !cov->empty() ? cov : nullptr) {
+            history.reserve(keep);
+            cpu.setTrace([this](const Cpu& z) {
+                const Word pc = z.regs().pc;
+                if (coverage) (*coverage)[pc] = 1;
+                if (keep) {
+                    if (history.size() < keep) history.push_back(pc);
+                    else history[next] = pc;
+                    next = (next + 1) % keep;
+                }
+                if (stubs && pc >= 0xB900 && pc <= 0xBDFF) return;
+                for (unsigned i = 0; i < 8; ++i) {
+                    if (z.memory().read(static_cast<Word>(pc + i)) != 0) return;
+                }
+                if (count++ == 0) first = pc;
+            });
+        }
+        ~EmptyFetchGuard() { cpu.setTrace(nullptr); }
+        EmptyFetchGuard(const EmptyFetchGuard&) = delete;
+        EmptyFetchGuard& operator=(const EmptyFetchGuard&) = delete;
+        void report(Json& j) const {
+            if (keep && !history.empty()) {
+                Json h = Json::array();
+                const std::size_t n = history.size();
+                for (std::size_t i = 0; i < n; ++i) h.push(hex16(history[(next + i) % n]));  // oldest first
+                j.set("history", h);
+            }
+            if (count == 0) return;
+            j.set("fetched_from_empty_memory", count).set("first_empty_fetch", hex16(first));
+        }
+    };
+
     /// run / runUntil, optionally raising an interrupt every `irq_every_cycles` T-states
     /// (the CPC's Gate Array does this about 300 times a second = every ~13300 T-states).
-    RunResult runCommand(std::optional<Word> until) {
-        const RunLimits l = limits();
+    RunResult runCommand(std::optional<Word> until, std::optional<RunLimits> given = std::nullopt) {
+        const RunLimits l = given ? *given : limits();
         const auto irq = static_cast<std::uint64_t>(integer("irq_every_cycles", 0, 0, 1LL << 40));
         if (irq == 0) return until ? s.cpu_.runUntil(*until, l) : s.cpu_.run(l);
         RunResult total;
         std::uint64_t remaining = l.maxInstructions;
         for (;;) {
             RunLimits slice;
-            slice.maxCycles = irq;
+            // interrupts come at fixed points of the machine's time (on a CPC: in step with the vertical sync), however the runs are cut
+            const std::uint64_t phase = s.cpu_.cycles() % irq;
+            slice.maxCycles = irq - phase;
             slice.maxInstructions = remaining;
-            const RunResult r = until ? s.cpu_.runUntil(*until, slice) : s.cpu_.run(slice);
+            RunResult r = until ? s.cpu_.runUntil(*until, slice) : s.cpu_.run(slice);
+            if (r.reason == StopReason::Halted && s.cpu_.regs().iff1) {
+                // HALT with interrupts enabled waits for the next one: the CPU idles to the end of the slice
+                CpuState st = s.cpu_.state();
+                const std::uint64_t idle = slice.maxCycles > r.cycles ? slice.maxCycles - r.cycles : 0;
+                st.cycles += idle;
+                s.cpu_.setState(st);
+                r.cycles += idle;
+                r.reason = StopReason::CycleLimit;
+            }
             total.instructions += r.instructions;
             total.cycles += r.cycles;
             total.reason = r.reason;
@@ -192,6 +256,9 @@ struct Session::Impl {
         }
         return total;
     }
+
+    bool stubsActive() const { return s.cpc_ && !s.memory_.hasLowRom(); }
+    std::size_t historySize() const { return static_cast<std::size_t>(integer("history", 0, 0, 10000)); }
 
     void requireFiles() const {
         if (!s.options_.allowFiles) throw SessionError("file access is disabled (start the server with --allow-files)");
@@ -250,6 +317,7 @@ struct Session::Impl {
     Json cmdAsm() {
         AssemblerOptions options;
         options.origin = addr("origin", Word{0});
+        options.optimize = flag("optimize", false);
         const AssemblyResult r = Assembler(options).assemble(text("source"));
         Json out = Json::object();
         if (!r.ok()) {
@@ -272,7 +340,10 @@ struct Session::Impl {
         Json syms = Json::object();
         for (const auto& [name, sym] : r.symbols) syms.set(name, hex16(static_cast<unsigned>(sym.value)));
         out.set("size", r.size()).set("segments", segs).set("symbols", syms);
-        if (!r.empty()) out.set("start", hex16(r.lowAddress())).set("end", hex16(r.highAddress()));
+        if (!r.empty()) {
+            out.set("start", hex16(r.lowAddress())).set("end", hex16(r.highAddress()));
+            s.programRange_ = std::make_pair(static_cast<Word>(r.lowAddress()), static_cast<Word>(r.highAddress()));
+        }
         if (const Json* e = req.find("entry")) {
             s.cpu_.regs().pc = address(*e, "entry");
             out.set("pc", hex16(s.cpu_.regs().pc));
@@ -327,6 +398,7 @@ struct Session::Impl {
 
     Json cmdStep() {
         const int n = static_cast<int>(integer("n", 1, 1, 1'000'000));
+        EmptyFetchGuard guard(s.cpu_, stubsActive(), historySize(), &s.coverage_);
         const bool trace = flag("trace", false);
         if (trace && n > 1000) throw SessionError("trace is limited to 1000 steps");
         Json traceLines = Json::array();
@@ -343,6 +415,7 @@ struct Session::Impl {
         last.cycles = cyc;
         Json j = runJson(last);
         if (trace) j.set("trace", traceLines);
+        guard.report(j);
         return j;
     }
 
@@ -365,9 +438,15 @@ struct Session::Impl {
         const Word spAfterReturn = static_cast<Word>(r.sp + 2);
         r.pc = target;
         r.halted = false;
+        EmptyFetchGuard guard(s.cpu_, stubsActive(), historySize(), &s.coverage_);
         const RunResult res = runCommand(sentinel);
         Json j = runJson(res);
-        j.set("returned", res.reason == StopReason::Address && s.cpu_.regs().sp == spAfterReturn);
+        // only the return address *with* the stack pointer from before the call counts: a jump through a pointer that is still 0
+        // can slide through empty memory and pass the sentinel by chance
+        const bool returned = res.reason == StopReason::Address && s.cpu_.regs().sp == spAfterReturn;
+        j.set("returned", returned);
+        if (res.reason == StopReason::Address && !returned) j.set("note", "reached the return address with a different stack pointer: not a real return");
+        guard.report(j);
         return j;
     }
 
@@ -401,19 +480,113 @@ struct Session::Impl {
         return j;
     }
 
+    Json cmdUnpack(const std::string& cmd) {
+        Memory& mem = s.memory_;
+        auto rangesJson = [&](std::size_t minLength, std::size_t most) {
+            auto ranges = mem.writtenRanges(minLength);
+            std::stable_sort(ranges.begin(), ranges.end(), [](const auto& a, const auto& b) { return a.second - a.first > b.second - b.first; });
+            Json arr = Json::array();
+            for (std::size_t i = 0; i < ranges.size() && i < most; ++i) {
+                Json e = Json::object();
+                e.set("start", hex16(ranges[i].first)).set("end", hex16(ranges[i].second - 1)).set("size", ranges[i].second - ranges[i].first);
+                arr.push(std::move(e));
+            }
+            return arr;
+        };
+        Json j = Json::object();
+        if (cmd == "track_writes") {
+            const bool on = flag("on", true);
+            if (on && (flag("clear", true) || !mem.tracking())) mem.trackWrites(true);
+            if (!on) mem.trackWrites(false);
+            s.unpackIgnore_.clear();
+            s.lastUnpackHit_.reset();
+            j.set("tracking", mem.tracking());
+            return j;
+        }
+        if (cmd == "written") {
+            j.set("tracking", mem.tracking()).set("bytes", mem.writtenBytes());
+            const auto minLength = static_cast<std::size_t>(integer("min_length", 16, 1, 65536));
+            const auto most = static_cast<std::size_t>(integer("limit", 20, 1, 200));
+            j.set("ranges", rangesJson(minLength, most));
+            return j;
+        }
+        if (cmd == "save_memory") {
+            requireFiles();
+            const Word a = addr("addr");
+            const auto len = static_cast<std::size_t>(integer("len", 0, 1, 65536));
+            std::vector<Byte> bytes;
+            {
+                RamView ram(s);
+                for (std::size_t i = 0; i < len; ++i) bytes.push_back(mem.read(static_cast<Word>(a + i)));
+            }
+            writeFile(text("file"), bytes);
+            j.set("file", text("file")).set("addr", hex16(a)).set("bytes", len);
+            return j;
+        }
+        // run_until_unpacked
+        const auto minWritten = static_cast<std::size_t>(integer("min_written", 1024, 1, 65536));
+        if (!flag("continue", false) || !mem.tracking()) {
+            mem.trackWrites(true);
+            s.unpackIgnore_.clear();
+            s.lastUnpackHit_.reset();
+        } else if (s.lastUnpackHit_) {
+            s.unpackIgnore_.push_back(*s.lastUnpackHit_);  // the stage that was seen last does not count again
+        }
+        std::vector<std::pair<unsigned, unsigned>> ignore = s.unpackIgnore_;
+        if (const Json* extra = req.find("ignore")) {
+            if (!extra->isArray()) throw SessionError("ignore must be a list of [first, last] pairs");
+            for (const Json& pair : extra->items()) {
+                if (!pair.isArray() || pair.items().size() != 2) throw SessionError("ignore must be a list of [first, last] pairs");
+                ignore.emplace_back(address(pair.items()[0], "ignore"), static_cast<unsigned>(address(pair.items()[1], "ignore")) + 1);
+            }
+        }
+        if (s.cpc_ && !s.memory_.hasLowRom()) ignore.emplace_back(0xB900, 0xBE00);  // the firmware jump block of the stubs never counts
+        EmptyFetchGuard guard(s.cpu_, stubsActive(), historySize(), &s.coverage_);
+        s.cpu_.watchWrittenCode(true, minWritten, ignore);
+        RunResult r;
+        try {
+            r = runCommand(std::nullopt, limits(50'000'000));
+        } catch (...) {
+            s.cpu_.watchWrittenCode(false);
+            throw;
+        }
+        s.cpu_.watchWrittenCode(false);
+        j = runJson(r);
+        guard.report(j);
+        if (r.reason == StopReason::WrittenCode) {
+            const Word pc = s.cpu_.regs().pc;
+            for (const auto& [first, end] : mem.writtenRanges(1)) {
+                if (pc >= first && pc < end) {
+                    s.lastUnpackHit_ = std::make_pair(first, end);
+                    Json region = Json::object();
+                    region.set("start", hex16(first)).set("end", hex16(end - 1)).set("size", end - first);
+                    j.set("region", region);
+                    break;
+                }
+            }
+        }
+        j.set("written_bytes", mem.writtenBytes()).set("ranges", rangesJson(64, 8));
+        return j;
+    }
+
     Json cmdHelp() const {
         static const char* kHelp[][2] = {
-            {"asm", "assemble {source, origin?, entry?} into memory; symbols become usable in later arguments"},
+            {"asm", "assemble {source, origin?, entry?, optimize?} into memory; symbols become usable in later arguments"},
             {"dis", "disassemble {addr? (default PC), count? (default 8)}"},
             {"read", "read memory {addr, len?} -> hex + ascii"},
             {"write", "write memory {addr, hex | bytes[]}"},
-            {"load_file", "load a binary file {file, addr?} (needs --allow-files)"},
+            {"load_file", "load a file {file, addr?, name? (file on a .dsk image), header?: false} (AMSDOS header: load address and PC from it; needs --allow-files)"},
+            {"dsk_ls", "directory of a CPC disk image {file} (needs --allow-files)"},
             {"regs", "show all registers"},
             {"set", "set registers {regs: {\"A\": 5, \"HL\": \"0x4000\"}}"},
             {"step", "execute {n?, trace?} instructions"},
             {"step_over", "execute one instruction; run through a CALL"},
             {"run", "run {max_instructions?, max_cycles?, until?} until breakpoint/limit/halt"},
-            {"run_until_return", "run until the current routine returns"},
+            {"run_until_return", "run until the current routine returns (run, step, call ...: history:n returns the last n instruction addresses)"},
+            {"track_writes", "remember which bytes the program writes {on?, clear?}"},
+            {"written", "the largest written ranges since track_writes {min_length?, limit?}"},
+            {"run_until_unpacked", "run until code is fetched from a written range of at least min_written bytes {min_written?, continue?, ignore?, max_instructions?}"},
+            {"save_memory", "write memory to a file {addr, len, file} (needs --allow-files)"},
             {"call", "call a routine {addr, regs?, return_address?, max_instructions?} and run until it returns"},
             {"break", "set breakpoint {addr}"}, {"unbreak", "remove breakpoint {addr}"},
             {"breaks", "list breakpoints/watchpoints"}, {"clear_breaks", "remove all breakpoints and watchpoints"},
@@ -437,12 +610,21 @@ struct Session::Impl {
             {"screen_drop", "delete a stored screen {name}"},
             {"firmware_log", "calls to firmware jump block entries seen while stubbed {clear?}"},
             {"console", "text printed through TXT_OUTPUT while stubbed {clear?}"},
-            {"analyze", "analyse code flow {entries[], extend?, inline_strings[]}"},
+            {"insert_disk", "a .dsk for the firmware stubs: CAS_IN_OPEN/DIRECT/CHAR/CLOSE read its files, the disc command READ SECTOR (&84, via KL_FIND_COMMAND) its sectors {file} (needs --allow-files)"},
+            {"disk_log", "what was read from the inserted disk, and by which CALL {clear?}"},
+            {"coverage", "where instructions were executed {on?, clear?, from?, to?, addresses?: true lists every executed instruction address} -> ranges of executed instruction addresses"},
+            {"controls", "joystick and keys as the program sees them {joystick?: bits 0 up 1 down 2 left 3 right 4 fire2 5 fire1, joystick2?, keys?: [0-79]}"},
+            {"save_disk", "write the inserted disk (with what the program wrote to it) to a file {file} (needs --allow-files)"},
+            {"analyze", "analyse code flow {entries[], from?, to? (the program), inline_strings[], inline_words[] (CALL/RST targets followed by an address, e.g. \"0x18\"), inline_control_args?: {\"0x1F\": 2} (argument bytes of control codes in inline strings), tables?: false}"},
             {"routines", "list subroutines {order?: bottom_up|address, undocumented_only?}"},
             {"listing", "annotated, re-assemblable listing {from?, to?, verify?, max_chars?}"},
             {"ann_label", "name an address {addr, name}"}, {"ann_routine", "document a routine {addr, name, summary, inputs?, outputs?, clobbers?}"},
             {"ann_variable", "name a variable {addr, name, size?, comment?}"}, {"ann_data", "mark data {addr, length, kind: bytes|words|text|pointers, name?, comment?}"},
-            {"ann_comment", "comment a line {addr, text, block?}"}, {"ann_remove", "remove a name/comment {addr}"},
+            {"ann_comment", "comment a line {addr, text, block?}"}, {"ann_remove", "remove a name, data region, comment or constant mark {addr}"},
+            {"ann_constant", "the 16-bit operand of the instruction at addr is a number, not an address {addr, remove?}"},
+            {"jump_tables", "jump tables found by analyze {max_entries?}"},
+            {"data_regions", "guess strings, pointer tables, word tables and variables, zero fill {apply?}"},
+            {"references", "data a stretch of code refers to, with type and contents {from, to?}"},
             {"ann_list", "all annotations"}, {"ann_title", "set the listing title {text}"},
             {"ann_save", "write annotations {file} (needs --allow-files)"}, {"ann_load", "read annotations {file} (needs --allow-files)"},
         };
@@ -468,12 +650,17 @@ struct Session::Impl {
         if (cmd == "regs") { j.set("regs", regs()); return j; }
         if (cmd == "set") return cmdSet();
         if (cmd == "step") return cmdStep();
-        if (cmd == "step_over") return runJson(cpu.stepOver(limits()));
-        if (cmd == "run") {
-            if (const Json* u = req.find("until")) return runJson(runCommand(address(*u, "until")));
-            return runJson(runCommand(std::nullopt));
+        if (cmd == "step_over" || cmd == "run" || cmd == "run_until_return") {
+            EmptyFetchGuard guard(cpu, stubsActive(), historySize(), &s.coverage_);
+            Json out;
+            if (cmd == "step_over") out = runJson(cpu.stepOver(limits()));
+            else if (cmd == "run_until_return") out = runJson(cpu.runUntilReturn(limits()));
+            else if (const Json* u = req.find("until")) out = runJson(runCommand(address(*u, "until")));
+            else out = runJson(runCommand(std::nullopt));
+            guard.report(out);
+            return out;
         }
-        if (cmd == "run_until_return") return runJson(cpu.runUntilReturn(limits()));
+        if (cmd == "track_writes" || cmd == "written" || cmd == "run_until_unpacked" || cmd == "save_memory") return cmdUnpack(cmd);
         if (cmd == "call") return cmdCall();
         if (cmd == "break") { cpu.addBreakpoint(addr("addr")); return j; }
         if (cmd == "unbreak") { cpu.removeBreakpoint(addr("addr")); return j; }
@@ -566,11 +753,61 @@ struct Session::Impl {
         if (cmd == "help") return cmdHelp();
         if (cmd == "load_file") {
             requireFiles();
-            const auto data = readFile(text("file"));
+            auto data = readFile(text("file"));
+            if (DskImage::looksLikeDsk(data)) {
+                // a file from a CPC disk image: {"file": "game.dsk", "name": "GAME.BIN"}
+                const Json* n = req.find("name");
+                if (!n || !n->isString()) throw SessionError("the file is a disk image: give the file on it with \"name\" (dsk_ls lists them)");
+                try {
+                    data = DskImage::parse(data).readFile(n->asString());
+                } catch (const DskError& e) {
+                    throw SessionError(e.what());
+                }
+            }
+            if (const auto h = parseAmsdosHeader(data); h && flag("header", true)) {
+                // the header says where the file belongs and where it starts
+                data.erase(data.begin(), data.begin() + 128);
+                if (h->length < data.size()) data.resize(h->length);
+                const Word load = addr("addr", h->load);
+                s.memory_.load(load, data);
+                if (!data.empty()) s.programRange_ = std::make_pair(load, static_cast<Word>(std::min<std::size_t>(0xFFFF, load + data.size() - 1)));
+                if (flag("set_pc", true)) s.cpu_.regs().pc = h->exec;
+                Json hj = Json::object();
+                hj.set("name", h->name).set("type", h->type).set("load", hex16(h->load)).set("entry", hex16(h->exec)).set("length", h->length);
+                j.set("loaded", data.size()).set("amsdos", hj);
+                return j;
+            }
             const Word a = addr("addr", Word{0});
-            if (looksLikeSna(data) && !req.find("addr")) s.memory_.load(0, loadSna(data).bytes());
-            else s.memory_.load(a, data);
+            if (looksLikeSna(data) && !req.find("addr")) {
+                s.memory_.load(0, loadSna(data).bytes());
+                s.programRange_.reset();
+            } else {
+                s.memory_.load(a, data);
+                if (!data.empty()) s.programRange_ = std::make_pair(a, static_cast<Word>(std::min<std::size_t>(0xFFFF, a + data.size() - 1)));
+            }
             j.set("loaded", data.size());
+            return j;
+        }
+        if (cmd == "dsk_ls") {
+            requireFiles();
+            try {
+                const DskImage disk = DskImage::parse(readFile(text("file")));
+                Json files = Json::array();
+                for (const DskFile& f : disk.files()) {
+                    Json e = Json::object();
+                    e.set("name", f.name).set("user", f.user).set("size", f.size).set("system", f.system).set("read_only", f.readOnly);
+                    try {
+                        if (const auto h = parseAmsdosHeader(disk.readFile(f.name, f.user))) {
+                            e.set("load", hex16(h->load)).set("entry", hex16(h->exec)).set("type", h->type).set("length", h->length);
+                        }
+                    } catch (const DskError&) {
+                    }
+                    files.push(std::move(e));
+                }
+                j.set("format", disk.format()).set("tracks", disk.trackCount()).set("files", files);
+            } catch (const DskError& e) {
+                throw SessionError(e.what());
+            }
             return j;
         }
         if (cmd == "save_state") {

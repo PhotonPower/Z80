@@ -6,6 +6,7 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <vector>
 #include <string>
 
 #include "z80/memory.hpp"
@@ -96,7 +97,8 @@ enum class StopReason {
     Halted,            ///< HALT with no interrupt that could wake the CPU
     InstructionLimit,
     CycleLimit,
-    Watchpoint         ///< a watched memory location was read/written
+    Watchpoint,        ///< a watched memory location was read/written
+    WrittenCode        ///< PC is in memory the program itself has written (see watchWrittenCode); not yet executed
 };
 
 const char* toString(StopReason reason);
@@ -191,6 +193,15 @@ public:
 
     void setTrace(Trace trace) { trace_ = std::move(trace); }
 
+    /// While on, a run stops (StopReason::WrittenCode) before executing an instruction that lies in memory the program has written,
+    /// if the run of written bytes around it is at least `minBytes` long and not in one of the `ignore` ranges [first, end): the sign
+    /// that a self-extracting program has unpacked its code and jumps into it. Needs Memory::trackWrites(true).
+    void watchWrittenCode(bool on, std::size_t minBytes = 1024, std::vector<std::pair<unsigned, unsigned>> ignore = {}) {
+        watchWritten_ = on;
+        watchMin_ = minBytes;
+        watchIgnore_ = std::move(ignore);
+    }
+
     /// Called instead of executing an instruction whenever PC lies in [first, last]. If the hook
     /// returns true it has handled the instruction (it must change PC, e.g. emulate a RET); the step
     /// then counts as 10 T-states. Used to stub out ROM routines that are not available.
@@ -201,6 +212,11 @@ public:
         hook_ = std::move(hook);
     }
     void clearExecHook() { hook_ = nullptr; }
+    /// Changes only the range of the hook (safe to call from inside the hook).
+    void setExecHookRange(Word first, Word last) {
+        hookFirst_ = first;
+        hookLast_ = last;
+    }
 
     void setPortHandlers(PortIn in, PortOut out) {
         portIn_ = std::move(in);
@@ -262,6 +278,9 @@ private:
     std::set<Word> breakpoints_;
     std::map<Word, WatchKind> watch_;
     Trace trace_;
+    bool watchWritten_ = false;
+    std::size_t watchMin_ = 1024;
+    std::vector<std::pair<unsigned, unsigned>> watchIgnore_;
     ExecHook hook_;
     Word hookFirst_ = 0;
     Word hookLast_ = 0;

@@ -17,3 +17,7 @@ CMakeUserPresets.json
 *.a
 *.lib
 *.exe
+
+# Python bytecode
+__pycache__/
+*.pyc

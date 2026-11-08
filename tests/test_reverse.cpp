@@ -206,8 +206,10 @@ int main() {
         CHECK(has(text, "greeting:"));
         CHECK(has(text, "screen at &C000: char row 24, byte column 10, scan line 0"));
         CHECK(has(text, "entry point"));
-        CHECK(!has(text, "sub_"));      // everything is named, except draw8's header (documented text mentions the name)
-        CHECK_EQ(listing.find("auto_labels")->asInt(), std::int64_t{1});  // loc for the d1 loop
+        // everything is named except the program entry, which is a routine of its own (header and sub_4000)
+        CHECK(has(text, "sub_4000:"));
+        CHECK(!has(text, "sub_4025") && !has(text, "sub_402F"));
+        CHECK_EQ(listing.find("auto_labels")->asInt(), std::int64_t{2});  // sub_4000 and loc for the d1 loop
 
         const Json capped = ask(s, R"({"cmd":"listing","max_chars":1000})");
         CHECK(capped.find("truncated")->asBool());
@@ -217,6 +219,19 @@ int main() {
         CHECK_EQ(all.find("annotations")->find("routines")->items().size(), std::size_t{1});
         CHECK(ok(ask(s, R"({"cmd":"ann_remove","addr":"draw8"})")));
         CHECK(has(str(ask(s, R"({"cmd":"listing"})"), "text"), "sub_402E"));  // back to the automatic name
+    }
+
+    // ---- an operand marked as a number gets no screen-address comment ----
+    {
+        Session s;
+        ask(s, R"({"cmd":"machine","type":"cpc"})");
+        ask(s, R"({"cmd":"asm","source":"ORG &4000\nstart: LD HL,&FCFF\nLD DE,&C053\nRET\n"})");
+        ask(s, R"({"cmd":"analyze","entries":["start"]})");
+        CHECK(ok(ask(s, R"({"cmd":"ann_constant","addr":"0x4000"})")));
+        const std::string text = str(ask(s, R"({"cmd":"listing"})"), "text");
+        CHECK(has(text, "LD HL,&FCFF"));
+        CHECK(!has(text, "char row 15, byte column 79"));                       // the marked constant
+        CHECK(has(text, "screen at &C000: char row 1, byte column 3, scan line 0"));  // the real screen address
     }
 
     // ---- comments must land on instructions; data ranges must not cover code; port writes know their origin ----

@@ -1,7 +1,9 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <span>
+#include <utility>
 #include <vector>
 
 #include "z80/types.hpp"
@@ -12,12 +14,28 @@ namespace z80 {
 class Memory {
 public:
     Memory() { data_.fill(0); }
+    // a copy shows its own copy of the upper ROM (a selected bank belongs to the owner and stays shared)
+    Memory(const Memory& o) { *this = o; }
+    Memory& operator=(const Memory& o) {
+        if (this == &o) return *this;
+        data_ = o.data_;
+        lowRom_ = o.lowRom_;
+        highRom_ = o.highRom_;
+        highView_ = o.highView_ == o.highRom_.data() ? highRom_.data() : o.highView_;
+        if (highRom_.empty() && o.highView_ == o.highRom_.data()) highView_ = nullptr;
+        lowRomOn_ = o.lowRomOn_;
+        highRomOn_ = o.highRomOn_;
+        romActive_ = o.romActive_;
+        written_ = o.written_;
+        writtenBytes_ = o.writtenBytes_;
+        return *this;
+    }
 
     /// What the CPU sees: RAM, or an enabled ROM overlay on top of it (see setLowRom/setHighRom).
     [[nodiscard]] Byte read(Word address) const {
         if (romActive_) {
             if (lowRomOn_ && address < 0x4000) return lowRom_[address];
-            if (highRomOn_ && address >= 0xC000) return highRom_[address - 0xC000];
+            if (highRomOn_ && highView_ && address >= 0xC000) return highView_[address - 0xC000];
         }
         return data_[address];
     }
@@ -27,7 +45,10 @@ public:
         return static_cast<Word>(read(address) | (read(static_cast<Word>(address + 1)) << 8));
     }
 
-    void write(Word address, Byte value) { data_[address] = value; }
+    void write(Word address, Byte value) {
+        data_[address] = value;
+        if (!written_.empty()) markWritten(address);
+    }
 
     /// Copies `bytes` to `address`; data that would pass 0xFFFF is truncated.
     void load(Word address, std::span<const Byte> bytes) {
@@ -36,34 +57,100 @@ public:
         }
     }
 
-    void clear() { data_.fill(0); }
+    void clear() {
+        data_.fill(0);
+        if (!written_.empty()) clearWritten();
+    }
+
+    // ---- which bytes were written (to find the code a self-extracting program has unpacked) -----------
+    /// Starts (or stops) remembering every byte the program writes from now on (one bit per byte). `load` does not count.
+    /// Starting clears the record.
+    void trackWrites(bool on) {
+        if (on) written_.assign(kAddressSpace / 8, 0);
+        else written_.clear();
+        writtenBytes_ = 0;
+    }
+    [[nodiscard]] bool tracking() const { return !written_.empty(); }
+    void clearWritten() {
+        std::fill(written_.begin(), written_.end(), Byte{0});
+        writtenBytes_ = 0;
+    }
+    [[nodiscard]] bool written(Word address) const { return !written_.empty() && ((written_[address >> 3] >> (address & 7U)) & 1U) != 0; }
+    /// Number of different bytes written since tracking started.
+    [[nodiscard]] std::size_t writtenBytes() const { return writtenBytes_; }
+    /// The run of consecutive written bytes around `address` as [first, end), looking at most `cap` bytes each way. {a, a} if not written.
+    [[nodiscard]] std::pair<unsigned, unsigned> writtenRunAround(Word address, std::size_t cap) const {
+        if (!written(address)) return {address, address};
+        unsigned first = address, end = static_cast<unsigned>(address) + 1;
+        while (address - first < cap && first > 0 && written(static_cast<Word>(first - 1))) --first;
+        while (end - address <= cap && end < kAddressSpace && written(static_cast<Word>(end))) ++end;
+        return {first, end};
+    }
+    /// The written bytes as ranges [first, end) of at least `minLength` consecutive bytes, in address order.
+    [[nodiscard]] std::vector<std::pair<unsigned, unsigned>> writtenRanges(std::size_t minLength = 1) const {
+        std::vector<std::pair<unsigned, unsigned>> out;
+        if (written_.empty()) return out;
+        unsigned start = 0;
+        bool inside = false;
+        for (unsigned a = 0; a <= kAddressSpace; ++a) {
+            const bool w = a < kAddressSpace && written(static_cast<Word>(a));
+            if (w && !inside) start = a, inside = true;
+            if (!w && inside) {
+                if (a - start >= minLength) out.emplace_back(start, a);
+                inside = false;
+            }
+        }
+        return out;
+    }
 
     // ---- optional ROM overlays (writes always go to the RAM below) -------------------------
     /// 16 KiB ROM visible at 0x0000-0x3FFF while enabled (e.g. the CPC lower ROM).
     void setLowRom(std::span<const Byte> rom) { lowRom_.assign(rom.begin(), rom.end()); lowRom_.resize(0x4000); update(); }
     /// 16 KiB ROM visible at 0xC000-0xFFFF while enabled (e.g. the CPC upper ROM).
-    void setHighRom(std::span<const Byte> rom) { highRom_.assign(rom.begin(), rom.end()); highRom_.resize(0x4000); update(); }
+    void setHighRom(std::span<const Byte> rom) {
+        highRom_.assign(rom.begin(), rom.end());
+        highRom_.resize(0x4000);
+        highView_ = highRom_.data();
+        update();
+    }
+    /// Shows another 16 KiB upper ROM (a bank the caller keeps alive, e.g. the one the ROM select port chose); nullptr = back to
+    /// the one of setHighRom.
+    void selectHighRom(const Byte* bank) {
+        highView_ = bank ? bank : (highRom_.empty() ? nullptr : highRom_.data());
+        update();
+    }
     void enableRoms(bool low, bool high) {
         lowRomOn_ = low;
         highRomOn_ = high;
         update();
     }
     [[nodiscard]] bool hasLowRom() const { return !lowRom_.empty(); }
-    [[nodiscard]] bool hasHighRom() const { return !highRom_.empty(); }
+    [[nodiscard]] bool hasHighRom() const { return highView_ != nullptr; }
     [[nodiscard]] bool lowRomEnabled() const { return lowRomOn_ && hasLowRom(); }
     [[nodiscard]] bool highRomEnabled() const { return highRomOn_ && hasHighRom(); }
 
     [[nodiscard]] std::span<const Byte> bytes() const { return data_; }
 
 private:
-    void update() { romActive_ = (lowRomOn_ && !lowRom_.empty()) || (highRomOn_ && !highRom_.empty()); }
+    void markWritten(Word address) {
+        Byte& b = written_[address >> 3];
+        const auto bit = static_cast<Byte>(1U << (address & 7U));
+        if (!(b & bit)) {
+            b |= bit;
+            ++writtenBytes_;
+        }
+    }
+    void update() { romActive_ = (lowRomOn_ && !lowRom_.empty()) || (highRomOn_ && highView_ != nullptr); }
 
     std::array<Byte, kAddressSpace> data_;
     std::vector<Byte> lowRom_;
     std::vector<Byte> highRom_;
+    const Byte* highView_ = nullptr;  // the upper ROM the CPU sees (highRom_ or a selected bank)
     bool lowRomOn_ = false;
     bool highRomOn_ = false;
     bool romActive_ = false;
+    std::vector<Byte> written_;  // empty = not tracking
+    std::size_t writtenBytes_ = 0;
 };
 
 }  // namespace z80

@@ -36,6 +36,7 @@ const char* toString(StopReason reason) {
         case StopReason::InstructionLimit: return "instruction_limit";
         case StopReason::CycleLimit: return "cycle_limit";
         case StopReason::Watchpoint: return "watchpoint";
+        case StopReason::WrittenCode: return "unpacked";
     }
     return "unknown";
 }
@@ -967,6 +968,12 @@ RunResult Cpu::execute(const RunSpec& spec) {
             return finish(StopReason::CycleLimit);
         }
 
+        if (watchWritten_ && !r.halted && memory_->written(r.pc)) {
+            const auto [firstWritten, endWritten] = memory_->writtenRunAround(r.pc, watchMin_);
+            bool ignored = false;
+            for (const auto& [f, e] : watchIgnore_) ignored = ignored || (r.pc >= f && r.pc < e);
+            if (!ignored && endWritten - firstWritten >= watchMin_) return finish(StopReason::WrittenCode);
+        }
         if (trace_) trace_(*this);
         step();
 
