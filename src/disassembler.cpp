@@ -227,6 +227,12 @@ void Disassembler::analyzeFlow(Word entry) {
                         pc = next;
                         break;
                     }
+                    // a program's own restart that returns like a CALL (rst_calls)
+                    if (ins.target && callingRestarts_.count(*ins.target)) {
+                        calls.push_back(*ins.target);
+                        pc = next;
+                        break;
+                    }
                     return;
                 case FlowKind::Return:
                 case FlowKind::JumpIndirect:

@@ -155,7 +155,7 @@ int main() {
         const char* keys[] = {"addr", "count", "len", "hex", "bytes", "regs", "n", "trace", "max_instructions", "max_cycles", "until", "name", "kind",
                               "source", "origin", "entry", "entries", "from", "to", "type", "text", "size", "length", "block", "apply", "min_written",
                               "continue", "ignore", "order", "max_chars", "irq_every_cycles", "file", "state", "a", "b", "crop", "remove", "on", "tables",
-                              "joystick", "keys", "addresses", "history", "inline_words", "inline_control_args", "raster"};
+                              "joystick", "keys", "addresses", "history", "inline_words", "rst_calls", "inline_control_args", "raster"};
         auto randomValue = [&](int depth, auto& self) -> z80::Json {
             switch (rng() % 9) {
                 case 0: return z80::Json(nullptr);

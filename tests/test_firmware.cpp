@@ -392,6 +392,31 @@ int main() {
         CHECK_EQ(v[1], Byte{0x11});
     }
 
+    // ---- rst_calls: a program's own restart returns like a CALL, the code behind it is analysed ----
+    {
+        Session s(withFiles());
+        makeCpc(s);
+        CHECK(assemble(s,
+                       "        ORG &0008\n"
+                       "rst8:   ADD A,L\n"
+                       "        LD L,A\n"
+                       "        RET NC\n"
+                       "        INC H\n"
+                       "        RET\n"
+                       "        ORG &4000\n"
+                       "start:  LD HL,&5000\n"
+                       "        LD A,3\n"
+                       "        RST &08\n"
+                       "behind: LD A,(HL)\n"
+                       "        RET\n"));
+        ask(s, R"({"cmd":"analyze","entries":["start"],"from":"0x4000","to":"0x4009","reset":true})");
+        CHECK(!has(str(ask(s, R"({"cmd":"listing","from":"0x4000","to":"0x4009"})"), "text"), "LD A,(HL)"));   // a restart ends the path
+        ask(s, R"({"cmd":"analyze","entries":["start"],"rst_calls":["0x08"],"from":"0x0008","to":"0x4009","reset":true})");
+        const std::string text = str(ask(s, R"({"cmd":"listing","from":"0x4000","to":"0x4009"})"), "text");
+        CHECK(has(text, "LD A,(HL)"));
+        CHECK(has(text, "RST &08"));
+    }
+
     // ---- the jump block holds ROM addresses: MC WAIT FLYBACK called directly in the lower ROM; PCHL at &001E ----
     {
         Session s(withFiles());

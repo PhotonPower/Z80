@@ -59,6 +59,9 @@ public:
     void addComment(Word address, std::string text);
     void addEntryPoint(Word address) { entryPoints_.insert(address); }
     void addInlineData(Word callTarget, InlineDataKind kind) { inlineData_[callTarget] = kind; }
+    /// A restart (its target, e.g. 0x08) that works like a CALL in this program: the flow goes on behind the RST and the routine at
+    /// the target is analysed. Without it a restart ends the path (on the CPC the firmware's RST &08 / &28 do not come back).
+    void addCallingRestart(Word target) { callingRestarts_.insert(target); }
     /// Control codes inside inline strings that are followed by argument bytes (e.g. &1F x y: those bytes never end the string).
     void setInlineControlArguments(std::map<Byte, unsigned> arguments) { inlineArgs_ = std::move(arguments); }
     [[nodiscard]] const std::map<Byte, unsigned>& inlineControlArguments() const { return inlineArgs_; }
@@ -126,6 +129,7 @@ private:
     std::map<Word, std::vector<std::string>> comments_;
     std::set<Word> entryPoints_;
     std::map<Word, InlineDataKind> inlineData_;
+    std::set<Word> callingRestarts_;
     std::map<Byte, unsigned> inlineArgs_;
     std::function<bool(Word)> isData_;
     std::map<Word, std::set<Word>> callers_;   // call target -> addresses of CALL instructions

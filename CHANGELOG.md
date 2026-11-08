@@ -36,6 +36,10 @@ die Versionierung an [Semantic Versioning](https://semver.org/lang/de/).
   `Memory::selectHighRom`.
 - Firmware-Stubs weichen, wo ein Programm eigenen Code über die Sprungleiste kopiert hat (Kopierschutz-Lader laufen dort).
 
+### Hinzugefügt (Analyse von Programmen mit eigenen Restarts, erprobt an GET DEXTER)
+- `analyze` mit `rst_calls` (z. B. `["0x08","0x10"]`): diese Restarts kehren wie ein `CALL` zurück, der Codefluss geht hinter dem `RST`
+  weiter und die Routine am Restart wird analysiert (die Restarts der CPC-Firmware dagegen beenden den Pfad). `Disassembler::addCallingRestart`.
+
 ### Behoben
 - Listing: ein mit `ann_constant` als Zahl markierter Operand bekommt keinen „screen at &C000“-Kommentar mehr.
 - `MC_SET_INKS`-Stub las HL statt DE und ohne den Rand als erstes Byte.

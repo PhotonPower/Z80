@@ -557,6 +557,10 @@ Json Session::Impl::cmdAnalyze() {
             return (*tables)[a] != 0 || ann->dataCovering(a) != nullptr || (cpc && a >= 0xB900 && a <= 0xBDFF);
         });
     }
+    if (const Json* rc = req.find("rst_calls"); rc && rc->isArray()) {
+        // restarts of the program's own that return like a CALL, e.g. ["0x08","0x10"] (the CPC firmware's RST &08 does not)
+        for (const Json& e : rc->items()) s.dis_->addCallingRestart(address(e, "rst_calls"));
+    }
     if (const Json* inl = req.find("inline_words"); inl && inl->isArray()) {
         // CALL/RST targets followed by one inline address, e.g. "0x18": RST &18 is the CPC firmware's FAR CALL
         for (const Json& e : inl->items()) s.dis_->addInlineData(address(e, "inline_words"), InlineDataKind::Word);
