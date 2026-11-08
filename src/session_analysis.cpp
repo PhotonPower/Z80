@@ -9,7 +9,15 @@ namespace z80 {
 
 // ---- CPC machine and firmware stubs ----------------------------------------------------------
 
-void Session::applyRomState() { memory_.enableRoms(video_.lowerRomOn, video_.upperRomOn); }
+void Session::applyRomState() {
+    if (!upperRoms_.empty()) {
+        // the ROM select port picks an upper ROM; a number without a ROM shows ROM 0 (BASIC), as on a real CPC
+        auto it = upperRoms_.find(video_.upperRomNumber);
+        if (it == upperRoms_.end()) it = upperRoms_.find(0);
+        memory_.selectHighRom(it != upperRoms_.end() ? it->second.data() : nullptr);
+    }
+    memory_.enableRoms(video_.lowerRomOn, video_.upperRomOn);
+}
 
 void Session::enableCpc() {
     cpc_ = true;
@@ -61,6 +69,7 @@ void Session::installFirmwareStubs() {
             memory_.write(static_cast<Word>(a + 2), static_cast<Byte>(rom >> 8));
         }
     }
+    for (unsigned a = 0xB900; a <= 0xBDFF; ++a) stubImage_[a - 0xB900] = memory_.read(static_cast<Word>(a));
 }
 
 void Session::setStubLowerRom(bool on) {
@@ -79,6 +88,10 @@ bool Session::firmwareStub(Cpu& cpu) {
         if (firmwareStub(cpu)) return true;
         r.pc = rom;
         return false;
+    }
+    // a program that copied its own code over the jump block (a protection loader does that) runs it: no stub there any more
+    for (unsigned k = 0; k < 3 && r.pc + k <= 0xBDFF; ++k) {
+        if (memory_.read(static_cast<Word>(r.pc + k)) != stubImage_[r.pc + k - 0xB900]) return false;
     }
     if (r.pc == kInterruptEntry || r.pc == kInterruptEntry + 1) {
         // the firmware's interrupt handler: once per frame (the interrupt during the vertical sync) the frame flyback event
@@ -187,6 +200,25 @@ bool Session::firmwareStub(Cpu& cpu) {
     } else if (*name == "SCR_GET_MODE") {
         r.main[7] = video_.mode;
         r.main[6] = static_cast<Byte>((r.f() & ~0x41) | (video_.mode == 0 ? 0x01 : 0) | (video_.mode == 1 ? 0x40 : 0));
+    } else if (*name == "SCR_SET_OFFSET") {
+        // HL = the offset of the screen start in the 16 KiB page (even, 0..&7FE): CRTC R12/R13 count words
+        const unsigned words = (r.hl() & 0x7FEu) >> 1;
+        video_.crtc[12] = static_cast<Byte>((video_.crtc[12] & 0x30) | (words >> 8));
+        video_.crtc[13] = static_cast<Byte>(words);
+    } else if (*name == "SCR_SET_BASE") {
+        // A = the high byte of the screen page (&00, &40, &80, &C0)
+        video_.crtc[12] = static_cast<Byte>((video_.crtc[12] & 0x03) | ((a >> 2) & 0x30));
+        clearScreen();
+    } else if (*name == "SCR_GET_LOCATION") {
+        r.main[7] = static_cast<Byte>(video_.screenBase() >> 8);       // A = base
+        r.setHl(video_.screenOffset());                    // HL = offset
+    } else if (*name == "SCR_CHAR_POSITION") {
+        // H = physical column, L = physical row -> HL = screen address of the character's top line, B = its width in bytes
+        const unsigned width = video_.mode == 0 ? 4u : video_.mode == 2 ? 1u : 2u;
+        const unsigned bytesPerLine = std::max(1u, static_cast<unsigned>(video_.crtc[1]) * 2u);
+        const unsigned inPage = (video_.screenOffset() + r.main[5] * bytesPerLine + r.main[4] * width) & 0x7FFu;  // the screen wraps every 2 KiB
+        r.setHl(static_cast<Word>(video_.screenBase() + inPage));
+        r.main[0] = static_cast<Byte>(width);
     } else if (*name == "SCR_GET_INK") {
         Byte ink = 0;  // the firmware colour number of the pen's hardware colour
         for (Byte i = 0; i < 27; ++i) {
@@ -416,7 +448,7 @@ Json Session::Impl::cmdVideo() {
     if (!s.cpc_) throw SessionError("not a CPC machine (use machine or load_sna first)");
     const cpc::VideoState& v = s.video_;
     Json j = Json::object();
-    j.set("mode", v.mode).set("screen_base", hex16(v.screenBase())).set("lower_rom", v.lowerRomOn).set("upper_rom", v.upperRomOn);
+    j.set("mode", v.mode).set("screen_base", hex16(v.screenBase())).set("screen_offset", hex16(v.screenOffset())).set("lower_rom", v.lowerRomOn).set("upper_rom", v.upperRomOn);
     Json pens = Json::array();
     for (std::size_t i = 0; i < 16; ++i) {
         Json e = Json::object();
@@ -457,11 +489,18 @@ Json Session::Impl::cmdLoadRom() {
     if (which == "lower") {
         s.memory_.setLowRom(all.subspan(0, 0x4000));
     } else if (which == "upper") {
-        s.memory_.setHighRom(all.subspan(0, 0x4000));
+        if (req.find("number")) {
+            // one of several upper ROMs (BASIC = 0, AMSDOS = 7, ...): the ROM select port chooses which one is visible
+            const auto number = static_cast<unsigned>(integer("number", 0, 0, 255));
+            s.upperRoms_[number].assign(data.begin(), data.begin() + 0x4000);
+        } else {
+            s.memory_.setHighRom(all.subspan(0, 0x4000));
+        }
     } else if (which == "both") {
         if (data.size() < 0x8000) throw SessionError("\"both\" needs a 32 KiB image (lower ROM followed by upper ROM)");
         s.memory_.setLowRom(all.subspan(0, 0x4000));
         s.memory_.setHighRom(all.subspan(0x4000, 0x4000));
+        if (!s.upperRoms_.empty()) s.upperRoms_[0].assign(data.begin() + 0x4000, data.begin() + 0x8000);
     } else {
         throw SessionError("'which' must be lower, upper or both");
     }
@@ -1122,6 +1161,7 @@ bool Session::Impl::analysisCommand(const std::string& cmd, Json& result) {
             throw SessionError(e.what());
         }
         s.inFile_ = {};
+        s.fdc_.insert(s.disk_.get());   // also for a real AMSDOS ROM or a loader that talks to the disc controller itself
         result = Json::object();
         result.set("format", s.disk_->format()).set("files", s.disk_->files().size());
     } else if (cmd == "save_disk") {
@@ -1199,9 +1239,19 @@ bool Session::Impl::analysisCommand(const std::string& cmd, Json& result) {
             j.set("what", e.what).set("addr", hex16(e.address)).set("bytes", e.bytes).set("call_site", hex16(e.pc));
             list.push(std::move(j));
         }
+        Json fdc = Json::array();   // what the disc controller did (real AMSDOS or a loader of its own)
+        for (const auto& e : s.fdc_.log) {
+            Json j = Json::object();
+            j.set("what", e.what).set("track", e.track).set("sector", hex8(e.sector));
+            if (e.st1 || e.st2) j.set("st1", hex8(e.st1)).set("st2", hex8(e.st2));
+            fdc.push(std::move(j));
+        }
         result = Json::object();
-        result.set("events", list);
-        if (flag("clear", false)) s.diskLog_.clear();
+        result.set("events", list).set("fdc", fdc);
+        if (flag("clear", false)) {
+            s.diskLog_.clear();
+            s.fdc_.log.clear();
+        }
     } else if (cmd == "console") {
         result = Json::object();
         result.set("text", s.console_);

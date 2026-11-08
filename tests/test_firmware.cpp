@@ -221,6 +221,177 @@ int main() {
         CHECK_EQ(vals[1], Byte{1});
     }
 
+    // ---- hardware scrolling: SCR_SET_OFFSET moves the picture, SCR_CHAR_POSITION and SCR_GET_LOCATION follow it ----
+    {
+        Session s(withFiles());
+        makeCpc(s);
+        CHECK(assemble(s,
+                       "        ORG &4000\n"
+                       "start:  XOR A\n"
+                       "        CALL &BC0E\n"          // SCR_SET_MODE 0
+                       "        LD HL,&07B0\n"         // one character row up (&800 - &50)
+                       "        CALL &BC05\n"          // SCR_SET_OFFSET
+                       "        CALL &BC0B\n"          // SCR_GET_LOCATION
+                       "        LD (loc),HL\n"
+                       "        LD (base),A\n"
+                       "        LD HL,&0101\n"         // column 1, row 1
+                       "        CALL &BC1A\n"          // SCR_CHAR_POSITION
+                       "        LD (pos),HL\n"
+                       "        LD A,B\n"
+                       "        LD (width),A\n"
+                       "        LD (HL),&FF\n"         // a mark on the top line of that character
+                       "done:   JR done\n"
+                       "loc:    DW 0\n"
+                       "base:   DB 0\n"
+                       "pos:    DW 0\n"
+                       "width:  DB 0\n"));
+        CHECK(ok(ask(s, R"({"cmd":"set","regs":{"PC":"start","SP":"0xBF00"}})")));
+        runTo(s, "done");
+        const Json sym = *ask(s, R"({"cmd":"symbols"})").find("symbols");
+        const unsigned at = static_cast<unsigned>(std::stoul(str(sym, "LOC"), nullptr, 16));
+        const auto v = readMem(s, at, 6);
+        CHECK_EQ(v[0] | v[1] << 8, 0x07B0);                     // the offset back
+        CHECK_EQ(v[2], Byte{0xC0});                              // the screen page
+        CHECK_EQ(v[3] | v[4] << 8, 0xC000 + ((0x07B0 + 80 + 4) & 0x7FF));  // wraps inside the 2 KiB of a line
+        CHECK_EQ(v[5], Byte{4});                                 // mode 0: 4 bytes per character
+        const Json video = ask(s, R"({"cmd":"video"})");
+        CHECK(has(video.dump(), "\"screen_offset\":\"0x07B0\""));
+    }
+
+    // ---- code a program copies over the jump block runs (no stub there any more); the untouched entries stay stubs ----
+    {
+        Session s(withFiles());
+        makeCpc(s);
+        CHECK(assemble(s,
+                       "        ORG &4000\n"
+                       "start:  LD HL,code\n"
+                       "        LD DE,&B901\n"
+                       "        LD BC,6\n"
+                       "        LDIR\n"
+                       "        CALL &B901\n"          // its own code now
+                       "        LD A,1\n"
+                       "        CALL &BC0E\n"          // SCR_SET_MODE is still a stub
+                       "done:   JR done\n"
+                       "code:   LD A,&5A\n"
+                       "        LD (&5000),A\n"
+                       "        RET\n"));
+        CHECK(ok(ask(s, R"({"cmd":"set","regs":{"PC":"start","SP":"0xBF00"}})")));
+        runTo(s, "done");
+        CHECK_EQ(readMem(s, 0x5000, 1)[0], Byte{0x5A});
+        CHECK(has(ask(s, R"({"cmd":"firmware_log"})").dump(), "SCR_SET_MODE"));
+    }
+
+    // ---- the disc controller (uPD765) at &FB7E/&FB7F: SEEK, SENSE INTERRUPT, READ DATA byte by byte, the result phase ----
+    {
+        const std::string fdcDisc = (dir / "fdc.dsk").string();
+        {
+            DskImage d = DskImage::createFormatted("data");
+            std::vector<Byte> pattern(512);
+            for (std::size_t i = 0; i < pattern.size(); ++i) pattern[i] = static_cast<Byte>(i ^ 0x5A);
+            CHECK(d.writeSector(2, 0xC3, pattern));
+            const std::vector<Byte> bytes = d.serialize();
+            std::ofstream(fdcDisc, std::ios::binary).write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        }
+        Session s(withFiles());
+        makeCpc(s);
+        CHECK(ok(ask(s, "{\"cmd\":\"insert_disk\",\"file\":" + quote(fdcDisc) + "}")));
+        CHECK(assemble(s,
+                       "        ORG &4000\n"
+                       "start:  LD HL,seek\n"
+                       "        CALL command\n"
+                       "        LD HL,sense\n"
+                       "        CALL command\n"
+                       "        LD HL,&6000\n"
+                       "        CALL results\n"         // ST0, PCN
+                       "        LD HL,read\n"
+                       "        CALL command\n"
+                       "        LD HL,&5000\n"
+                       "data:   IN A,(C)\n"             // main status: RQM, and EXM while there are data
+                       "        JP P,data\n"
+                       "        AND &20\n"
+                       "        JR Z,done_data\n"
+                       "        INC C\n"
+                       "        IN A,(C)\n"
+                       "        LD (HL),A\n"
+                       "        INC HL\n"
+                       "        DEC C\n"
+                       "        JR data\n"
+                       "done_data:\n"
+                       "        LD HL,&6002\n"
+                       "        CALL results\n"         // ST0 ST1 ST2 C H R N
+                       "done:   JR done\n"
+                       "command: LD BC,&FB7E\n"        // HL = length, bytes
+                       "        LD D,(HL)\n"
+                       "        INC HL\n"
+                       "cmd1:   IN A,(C)\n"
+                       "        JP P,cmd1\n"
+                       "        INC C\n"
+                       "        LD A,(HL)\n"
+                       "        OUT (C),A\n"
+                       "        DEC C\n"
+                       "        INC HL\n"
+                       "        DEC D\n"
+                       "        JR NZ,cmd1\n"
+                       "        RET\n"
+                       "results: LD BC,&FB7E\n"
+                       "res1:   IN A,(C)\n"
+                       "        JP P,res1\n"
+                       "        AND &40\n"
+                       "        RET Z\n"                  // no more results
+                       "        INC C\n"
+                       "        IN A,(C)\n"
+                       "        LD (HL),A\n"
+                       "        INC HL\n"
+                       "        DEC C\n"
+                       "        JR res1\n"
+                       "seek:   DB 3,&0F,0,2\n"
+                       "sense:  DB 1,&08\n"
+                       "read:   DB 9,&46,0,2,0,&C3,2,&C3,&2A,&FF\n"));
+        CHECK(ok(ask(s, R"({"cmd":"set","regs":{"PC":"start","SP":"0xBF00"}})")));
+        runTo(s, "done");
+        const auto sense = readMem(s, 0x6000, 2);
+        CHECK_EQ(sense[0], Byte{0x20});   // seek end, drive 0
+        CHECK_EQ(sense[1], Byte{2});      // on track 2
+        const auto data = readMem(s, 0x5000, 4);
+        CHECK_EQ(data[0], Byte{0x5A});
+        CHECK_EQ(data[3], Byte{0x59});
+        CHECK_EQ(readMem(s, 0x51FF, 1)[0], static_cast<Byte>(0xFF ^ 0x5A));
+        const auto res = readMem(s, 0x6002, 7);
+        CHECK_EQ(res[0], Byte{0x40});     // the CPC has no terminal count: the read ends at the end of the cylinder
+        CHECK_EQ(res[1], Byte{0x80});
+        CHECK_EQ(res[5], Byte{0xC4});     // R: the next sector
+        CHECK(has(ask(s, R"({"cmd":"disk_log"})").dump(), "read 2/&C3"));
+    }
+
+    // ---- upper ROMs by number: the ROM select port (&DFxx) picks one; a number without a ROM shows ROM 0 ----
+    {
+        const std::string rom0 = (dir / "rom0.rom").string(), rom7 = (dir / "rom7.rom").string();
+        std::ofstream(rom0, std::ios::binary) << std::string(0x4000, '\x11');
+        std::ofstream(rom7, std::ios::binary) << std::string(0x4000, '\x77');
+        Session s(withFiles());
+        makeCpc(s);
+        CHECK(ok(ask(s, "{\"cmd\":\"load_rom\",\"which\":\"upper\",\"number\":0,\"file\":" + quote(rom0) + "}")));
+        CHECK(ok(ask(s, "{\"cmd\":\"load_rom\",\"which\":\"upper\",\"number\":7,\"file\":" + quote(rom7) + "}")));
+        CHECK(assemble(s,
+                       "        ORG &4000\n"
+                       "start:  LD BC,&7F84\n"         // upper ROM on
+                       "        OUT (C),C\n"
+                       "        LD BC,&DF07\n"         // ROM 7
+                       "        OUT (C),C\n"
+                       "        LD A,(&C000)\n"
+                       "        LD (&5000),A\n"
+                       "        LD BC,&DF03\n"         // no ROM 3: ROM 0
+                       "        OUT (C),C\n"
+                       "        LD A,(&C000)\n"
+                       "        LD (&5001),A\n"
+                       "done:   JR done\n"));
+        CHECK(ok(ask(s, R"({"cmd":"set","regs":{"PC":"start","SP":"0xBF00"}})")));
+        runTo(s, "done");
+        const auto v = readMem(s, 0x5000, 2);
+        CHECK_EQ(v[0], Byte{0x77});
+        CHECK_EQ(v[1], Byte{0x11});
+    }
+
     // ---- the jump block holds ROM addresses: MC WAIT FLYBACK called directly in the lower ROM; PCHL at &001E ----
     {
         Session s(withFiles());

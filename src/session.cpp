@@ -16,6 +16,8 @@ Session::Session(SessionOptions options)
     : options_(options), memoryStore_(std::make_unique<Memory>()), memory_(*memoryStore_), cpu_(memory_) {
     cpu_.setPortHandlers(
         [this](Word port) -> Byte {
+            // the disc controller: A10 = 0, A8 = 1, A7 = 0; A0 = 0 main status, 1 data
+            if (cpc_ && (port & 0x0580) == 0x0100) return (port & 1) ? fdc_.readData() : fdc_.status();
             if (cpc_ && input_.empty()) {
                 // PPI port B (&F5xx): bit 0 = vertical sync, bits 1-3 = 111 (Amstrad), 50 Hz, expansion and printer idle.
                 // A frame takes 312 lines * 64 us = 79872 T-states; the sync pulse lasts about 16 lines.
@@ -34,9 +36,16 @@ Session::Session(SessionOptions options)
         [this](Word port, Byte value) {
             ioLog_.push_back({port, value, static_cast<Word>(cpu_.regs().pc - 2)});  // OUT (n),A and OUT (C),r are 2 bytes long
             while (ioLog_.size() > options_.maxIoLog) ioLog_.pop_front();
+            if (cpc_ && (port & 0x0480) == 0) {   // A10 = 0, A7 = 0: the disc controller (A8 = 1) or the motor (A8 = 0)
+                if (port & 0x0100) {
+                    if (port & 1) fdc_.writeData(value);
+                } else {
+                    fdc_.motor(value & 1);
+                }
+            }
             if (cpc_) {
                 const cpc::VideoState before = video_;
-                if (video_.writePort(port, value)) applyRomState();
+                if (video_.writePort(port, value) || before.upperRomNumber != video_.upperRomNumber) applyRomState();
                 if (before.mode != video_.mode || before.inks != video_.inks) noteVideoChange(before);
             }
             if (cpc_ && ((port >> 8) & 0x08) == 0) {  // PPI: remember what the PSG and the keyboard scanning need

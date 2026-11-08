@@ -221,6 +221,19 @@ int main() {
         CHECK(has(str(ask(s, R"({"cmd":"listing"})"), "text"), "sub_402E"));  // back to the automatic name
     }
 
+    // ---- an operand marked as a number gets no screen-address comment ----
+    {
+        Session s;
+        ask(s, R"({"cmd":"machine","type":"cpc"})");
+        ask(s, R"({"cmd":"asm","source":"ORG &4000\nstart: LD HL,&FCFF\nLD DE,&C053\nRET\n"})");
+        ask(s, R"({"cmd":"analyze","entries":["start"]})");
+        CHECK(ok(ask(s, R"({"cmd":"ann_constant","addr":"0x4000"})")));
+        const std::string text = str(ask(s, R"({"cmd":"listing"})"), "text");
+        CHECK(has(text, "LD HL,&FCFF"));
+        CHECK(!has(text, "char row 15, byte column 79"));                       // the marked constant
+        CHECK(has(text, "screen at &C000: char row 1, byte column 3, scan line 0"));  // the real screen address
+    }
+
     // ---- comments must land on instructions; data ranges must not cover code; port writes know their origin ----
     {
         Session s;

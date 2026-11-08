@@ -5,6 +5,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "z80/types.hpp"
@@ -77,6 +78,8 @@ public:
     [[nodiscard]] unsigned sides() const { return sides_; }
     [[nodiscard]] const std::string& creator() const { return creator_; }
     [[nodiscard]] const Track* track(unsigned number, unsigned side = 0) const;
+    /// The same, to change its sectors (the disc controller writes through it); nullptr if the track is not formatted.
+    Track* trackRef(unsigned number, unsigned side = 0) { return const_cast<Track*>(std::as_const(*this).track(number, side)); }
     [[nodiscard]] const Sector* sector(unsigned track, Byte id, unsigned side = 0) const;
     /// Overwrites the data of a sector (side 0); false if there is no such sector.
     bool writeSector(unsigned track, Byte id, std::span<const Byte> data);

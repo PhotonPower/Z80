@@ -43,6 +43,7 @@ add_library(z80core STATIC
   src/annotations.cpp
   src/assembler.cpp
   src/cpc.cpp
+  src/fdc.cpp
   src/cpc_data.cpp
   src/cpu.cpp
   src/decoder.cpp

@@ -262,11 +262,22 @@ Für ganze Spiele bilden die Stubs einen kleinen **Kernel** nach:
   enthalten PCBC/PCDE/PCHL.
 - **Eingaben** (`controls`): Joystick und Tasten für `KM_GET_JOYSTICK`, `KM_TEST_KEY` und die Tastaturmatrix.
 - **Bild**: Rasterteilungen (Modus/Farben mitten im Bild) erscheinen im Screenshot zeilengenau.
+- **Hardware-Scrolling**: `SCR_SET_OFFSET`/`SCR_SET_BASE` setzen die CRTC-Startadresse (R12/R13), `SCR_GET_LOCATION` liest sie,
+  `SCR_CHAR_POSITION` rechnet den Offset ein (mit dem Umlauf im 2-KiB-Block einer Rasterzeile); der Screenshot zeigt das Bild ab
+  dieser Adresse, `video` meldet sie als `screen_offset`.
 - **`coverage`** zeichnet auf, welcher Code lief – ausgeführte Adressen, die die Flussanalyse nicht erreicht, sind
   Einsprungpunkte (Interrupt-Handler, Vektoren, Tabellen).
 
 Mit `--rom DATEI:both` (ein 32-KiB-Abbild: unteres ROM + BASIC) bzw. `--rom os.rom:lower --rom basic.rom:upper`
 läuft die **echte Firmware**; die ROMs blendet das Gate Array wie auf der Hardware ein und aus.
+
+**Echte Firmware mit Diskette** (z. B. für Kopierschutz-Lader, die AMSDOS-Routinen oder den Floppy-Controller selbst benutzen):
+`load_rom` mit `which:"both"` (OS + BASIC), dazu `which:"upper","number":7` für AMSDOS, dann `insert_disk`. z80tool bildet den
+**Floppy-Controller µPD765** an `&FA7E`/`&FB7E`/`&FB7F` nach: SEEK, RECALIBRATE, SENSE INTERRUPT/DRIVE STATUS, READ ID, READ (DELETED)
+DATA und WRITE (DELETED) DATA, mit den Statusbytes ST1/ST2, die ein geschütztes Abbild für einen Sektor speichert (Datenfehler,
+Deleted-Data-Marke), der Sektorgröße aus der ID und dem Ende am Zylinderende (ST0 &40, ST1 &80) wie auf dem CPC. Ohne Zeitverhalten:
+Daten sind sofort bereit. `disk_log` zeigt unter `fdc`, was der Controller las. Getippt wird über `controls` (z. B. `RUN"ERE"`).
+Ein Programm, das eigenen Code über die Sprungleiste kopiert (`&B900-&BDFF`), führt im Stub-Betrieb diesen Code aus statt der Stubs.
 
 Das ist nicht nur behauptet, sondern getestet: Mit dem ROM der CPC 6128 (liegt dem Emulator Caprice32 bei;
 Amstrad hat die Weitergabe für Emulatoren erlaubt – das ROM ist **nicht** Teil dieses Repositorys) bootet

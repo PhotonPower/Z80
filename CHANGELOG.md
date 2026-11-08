@@ -24,7 +24,20 @@ die Versionierung an [Semantic Versioning](https://semver.org/lang/de/).
 - **Analyse**: `inline_words` (Adresse hinter `RST &18`/`CALL`, im Listing als `DW name`), `inline_control_args` (Steuercodes mit
   Argumentbytes in Inline-Texten); die Firmware-Sprungleiste ist auf dem CPC kein Teil des Programms.
 
+### Hinzugefügt (Hardware-Scrolling, erprobt an ROLAND IN THE CAVES)
+- Firmware-Stubs `SCR_SET_OFFSET`, `SCR_SET_BASE`, `SCR_GET_LOCATION`, `SCR_CHAR_POSITION` (mit dem Offset und dem 2-KiB-Umlauf);
+  `video` meldet `screen_offset`, `cpc::VideoState::screenOffset()`.
+
+### Hinzugefügt (echte Firmware mit Diskette, erprobt am Kopierschutz von GET DEXTER)
+- **Floppy-Controller µPD765** (`Fdc`, Ports `&FA7E`/`&FB7E`/`&FB7F`) für die eingelegte `.dsk`: SEEK, RECALIBRATE, SENSE INTERRUPT STATUS,
+  SENSE DRIVE STATUS, READ ID, READ DATA, READ DELETED DATA, WRITE (DELETED) DATA; ST1/ST2 aus dem Abbild (Datenfehler, Deleted-Data-Marke),
+  Ende am Zylinderende wie auf dem CPC; `disk_log` → `fdc`. `DskImage::trackRef`.
+- **Obere ROMs nach Nummer** (`load_rom` mit `number`): der ROM-Select-Port wählt sie, wie die Hardware (fehlende Nummer → ROM 0);
+  `Memory::selectHighRom`.
+- Firmware-Stubs weichen, wo ein Programm eigenen Code über die Sprungleiste kopiert hat (Kopierschutz-Lader laufen dort).
+
 ### Behoben
+- Listing: ein mit `ann_constant` als Zahl markierter Operand bekommt keinen „screen at &C000“-Kommentar mehr.
 - `MC_SET_INKS`-Stub las HL statt DE und ohne den Rand als erstes Byte.
 - CRTC-Voreinstellung ohne R3/R4/R7 (Bildposition für Rasterteilungen falsch).
 

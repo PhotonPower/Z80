@@ -65,7 +65,8 @@ struct VideoState {
     /// the ROM visibility changed.
     bool writePort(Word port, Byte value);
 
-    [[nodiscard]] Word screenBase() const;  ///< start of the 16 KiB screen page
+    [[nodiscard]] Word screenBase() const;    ///< start of the 16 KiB screen page
+    [[nodiscard]] Word screenOffset() const;  ///< where the picture starts in the page (CRTC R12/R13, in bytes; hardware scrolling)
 };
 
 struct RenderOptions {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <deque>
 #include <map>
 #include <memory>
@@ -10,6 +11,7 @@
 #include "z80/analysis.hpp"
 #include "z80/annotations.hpp"
 #include "z80/assembler.hpp"
+#include "z80/fdc.hpp"
 #include "z80/cpc.hpp"
 #include "z80/cpu.hpp"
 #include "z80/disassembler.hpp"
@@ -91,6 +93,8 @@ private:
     std::string console_;                 ///< characters passed to TXT_OUTPUT while stubbed
     // ---- a virtual disc drive for the firmware stubs (insert_disk): AMSDOS file reading and the READ SECTOR command ----
     std::unique_ptr<DskImage> disk_;
+    Fdc fdc_;                             ///< the disc controller at &FA7E/&FB7E/&FB7F (used by a real AMSDOS ROM or a loader)
+    std::map<unsigned, std::vector<Byte>> upperRoms_;  ///< upper ROMs by number (load_rom "number"); the select port picks one
     struct InFile {
         bool open = false;
         std::string name;
@@ -124,6 +128,8 @@ private:
     /// lower ROM. A program that reads an address and calls the ROM directly (with the lower ROM enabled) still reaches the stubs.
     static constexpr Word kFakeRom = 0x3A00;
     bool stubLowerRom_ = false;  ///< the program enabled the lower ROM (KL_L_ROM_ENABLE): calls into kFakeRom.. are stubbed
+    /// the jump block (&B900-&BDFF) as the stubs installed it: where a program has written its own code over it, that code runs
+    std::array<Byte, 0x500> stubImage_{};
     void setStubLowerRom(bool on);
     std::vector<Byte> coverage_;  ///< 64 KiB: 1 where an instruction started (command coverage); empty while off
     // ---- raster splits: mode and ink changes with the display line they happened on, for the last complete frame ----

@@ -181,6 +181,7 @@ bool VideoState::writePort(Word port, Byte value) {
 }
 
 Word VideoState::screenBase() const { return static_cast<Word>(((crtc[12] >> 4) & 3) * 0x4000); }
+Word VideoState::screenOffset() const { return static_cast<Word>(((crtc[12] & 3) << 8 | crtc[13]) * 2u); }
 
 // ---- rendering ----------------------------------------------------------------------------------
 

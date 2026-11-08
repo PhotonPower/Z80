@@ -452,7 +452,9 @@ void Builder::codeLine(Word a, Line& line) {
     }
 
     // (not for a port number: LD BC,PPI_A+&0E is no screen address, even though &F40E lies in the screen memory)
-    if (options_.hardwareComments && autoComment.empty() && ins.mnemonic == "LD" && ins.length == 3 && operands == ins.operands) {
+    // (nor for an operand marked as a number: LD HL,&FCFF as a pair of step sizes is no screen address either)
+    if (options_.hardwareComments && autoComment.empty() && ins.mnemonic == "LD" && ins.length == 3 && operands == ins.operands &&
+        !ann_.isConstant(a)) {
         static const std::set<Byte> withAddress = {0x01, 0x11, 0x21, 0x31, 0x22, 0x2A, 0x32, 0x3A};
         if (withAddress.count(ins.bytes[0])) {
             const std::string where = cpc::describeScreenAddress(static_cast<Word>(ins.bytes[1] | (ins.bytes[2] << 8)));

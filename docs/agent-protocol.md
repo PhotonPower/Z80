@@ -84,7 +84,7 @@ der nie gesetzt wurde, oder eine Routine, die Zustand braucht, den anderer Code 
 | `help` | – | Befehlsliste |
 | `machine` | `type:"cpc"` | CPC-Modus: Videohardware (Gate Array/CRTC), Firmware-Stubs, Bildschirm; setzt einen Stack unterhalb des Bildschirms |
 | `load_sna` | `file`, `state?` | CPC-Snapshot inkl. Register und Videozustand laden (*braucht `--allow-files`*) |
-| `load_rom` | `file`, `which` (`lower`, `upper`, `both`) | ROM-Abbild; blendet sich wie auf der Hardware ein/aus; ersetzt die Firmware-Stubs (*braucht `--allow-files`*) |
+| `load_rom` | `file`, `which` (`lower`, `upper`, `both`), `number?` (obere ROMs nach Nummer: BASIC 0, AMSDOS 7, …) | ROM-Abbild; blendet sich wie auf der Hardware ein/aus, der ROM-Select-Port (`&DFxx`) wählt das obere ROM (ohne ROM unter einer Nummer: ROM 0); ersetzt die Firmware-Stubs (*braucht `--allow-files`*) |
 | `video` | – | Modus, Farben der 16 Stifte, Rand, CRTC-Register |
 | `screen` | `name?`, `border?`, `crop?{col0,row0,col1,row1}`, `zoom?` | Bildschirm als PNG (`png_base64`), 640 px breit; `crop` in Textzellen (80×25), `zoom` 1–16 |
 | `screen_diff` | `a`, `b?` | Vergleich gespeicherter Bilder: `changed_pixels`, `bbox`, `text_cells`, `changed_percent` |
