@@ -28,8 +28,16 @@ Das Modell **führt Code aus, ohne etwas zu gefährden**:
 | `run_routine` | Routine im Emulator wie eine Funktion aufrufen (Register/Speicher vorgeben); Ergebnis: Register, geänderter Speicher, Firmware-Aufrufe, Hardware-Port-Schreibzugriffe, Textausgabe, **Bildschirmänderung** (Bereich in Textzellen + optional als Bild) |
 | `screenshot` | aktuellen Bildschirm als Bild, optional ausgeschnitten und vergrößert |
 | `reset_machine` | Ausgangszustand wiederherstellen (sonst geschieht das nach jedem `run_routine` automatisch) |
-| `name_label`, `document_routine`, `name_variable`, `mark_data`, `add_comment` | **Namen und Kommentare** festhalten |
+| `name_label`, `document_routine`, `name_variable`, `mark_data`, `add_comment` | **Namen und Kommentare** festhalten (`mark_data kind=text` braucht keine Länge: der Text endet mit seinem NUL oder dem Zeichen mit Bit 7) |
+| `mark_constant` | ein 16-Bit-Operand ist eine **Zahl**, keine Adresse (`LD BC,&0506`): kein `data_xxxx` dafür im Listing |
+| `remove_annotation` | einen Namen, eine Doku, einen Datenbereich oder einen Kommentar zurücknehmen (ein falsches `mark_data` ließ sich vorher nicht rückgängig machen) |
 | `finish_routine` | Routine abschließen |
+
+`run_routine` kann vorher **andere Routinen auf derselben Maschine laufen lassen** (`setup`, meist der Programmeinsprung, der Variablen und
+Zeiger initialisiert), Speicher als Text vorbereiten (`"memory":[{"addr":"0x5000","text":"HELLO"}]`) und sagt deutlich, wenn eine Routine nicht
+wirklich zurückgekehrt ist oder durch **leeren Speicher** lief (ein Zeiger, der nie gesetzt wurde). Geänderter Speicher wird ab dem Zustand nach der
+Vorbereitung gemessen, mit ASCII-Spalte und den Namen der Variablen, in denen er liegt (`[run_count]`); Schreibzugriffe **hinter das Programmende**
+oder **in Code** (selbstmodifizierender Code) werden eigens gemeldet, Firmware-Aufrufe mit der Adresse ihres `CALL`.
 
 Das Modell **kann den Code nicht verändern**. Es liefert nur Namen und Texte. Das fertige Listing wird
 aus den echten Bytes erzeugt und anschließend **neu assembliert und Byte für Byte verglichen**
@@ -62,7 +70,10 @@ python3 agent/z80_annotate.py --sna spiel.sna --project spiel.z80proj.json --out
 
 | Option | Bedeutung |
 |---|---|
-| `--sna DATEI` / `--bin DATEI --org 0x4000` | Eingabe |
+| `--sna DATEI` / `--bin DATEI --org 0x4000` | Eingabe; eine Datei mit **AMSDOS-Kopf** wird dort geladen, wo der Kopf sagt (Einsprung ebenso) |
+| `--dsk ABBILD --dsk-file NAME` | ein Programm direkt von einem CPC-Disk-Abbild (`z80tool dsk ls ABBILD` zeigt die Dateien) |
+| `--dry-run` | nur laden und analysieren: Routinen in Bearbeitungsreihenfolge, Größen, Sprungtabellen, Daten, Token-Schätzung; **kein** Modell |
+| `--no-auto-tables`, `--no-auto-data` | vorgeschlagene Zeigertabellen nicht verfolgen bzw. erkannte Strings/Tabellen nicht als Daten eintragen |
 | `--entry ADR` (mehrfach) | Einsprungpunkte (Standard: PC aus dem Snapshot) |
 | `--inline-string ADR` (mehrfach) | Routinen, hinter deren `CALL` ein Text steht (letztes Zeichen Bit 7) |
 | `--rom DATEI:lower\|upper\|both` | echte Firmware benutzen statt der Stubs (siehe unten) |
@@ -78,8 +89,9 @@ python3 agent/z80_annotate.py --sna spiel.sna --project spiel.z80proj.json --out
 Rückgabewert: `0`, wenn das Listing verifiziert ist; `1`, wenn nicht; `2` bei Verbindungsproblemen.
 
 **Vollständigkeitsprüfung:** Beim ersten `finish_routine` prüft der Orchestrator die Routine: noch unbenannte Labels
-(`loc_…`), ungenannte Speicherstellen (`LD (&1C97),A`) und zu wenige Kommentare (etwa einer je 10 Befehle) werden dem Modell
-aufgelistet. Ein zweiter Aufruf gilt immer als endgültig, das Modell kann also nie festhängen.
+(`loc_…`), ungenannte Speicherstellen (`LD (&1C97),A`, `LD HL,data_40A5`), eine Dokumentation ohne `inputs`/`outputs`/`clobbers` oder ohne
+`confidence`, und zu wenige Kommentare (etwa einer je 10 Befehle, höchstens einer je zwei) werden dem Modell aufgelistet. Ein zweiter Aufruf gilt
+im Orchestrator immer als endgültig, das Modell kann also nie festhängen (`z80_drive.py finish` ist dagegen streng, siehe unten).
 
 Ablauf: Analyse ab den Einsprungpunkten → Routinen **von den Blättern zur Wurzel** (zuerst, was nichts
 Undokumentiertes aufruft), je Routine eine eigene Unterhaltung mit dem Listing, den Namen der bereits
@@ -125,6 +137,85 @@ nächsten Durchgang geprüft.
 **Was `gaps left: 0` bedeutet:** Der Bericht misst *Vollständigkeit* (Namen, Kommentare, Dokumentation, Selbsteinschätzung),
 nicht *Richtigkeit*. Kleine Modelle schreiben fast immer `confidence: high`. Wichtige Routinen kannst du deshalb mit
 `--refine-all` (jede dokumentierte Routine wird erneut geprüft) oder von einem größeren Modell gegenlesen lassen.
+
+## Probelauf ohne Modell (`--dry-run`)
+
+```sh
+build/z80tool asm examples/cpc/demo_cpc.asm -o demo_cpc.bin
+python3 agent/z80_annotate.py --bin demo_cpc.bin --org 0x4000 --dry-run
+```
+
+zeigt, was ein echter Lauf tun würde: welche Datenbereiche und Sprungtabellen automatisch erkannt werden, die Routinen in Bearbeitungsreihenfolge mit
+Größe, Aufrufern, Firmware-Aufrufen und einer Schätzung der Prompt-Größe, und eine Warnung, wenn die größte Routine mehr als 40 % des
+Kontextfensters braucht. So lassen sich Ladeadresse, Einsprungpunkte und `--num-ctx` prüfen, bevor ein Modell Stunden rechnet. Eine ausführliche
+Anleitung mit diesem Beispiel steht in [walkthrough.md](walkthrough.md).
+
+## Von Hand: `agent/z80_drive.py`
+
+Dieselben Werkzeuge, Berichte und Prüfungen wie im Orchestrator, aber **ein Schritt je Aufruf**, der Zustand in einem Arbeitsverzeichnis: für einen
+Menschen oder einen Agenten in einer Shell, der die Rolle des Modells übernimmt (wenn kein Ollama läuft).
+
+```sh
+python3 agent/z80_drive.py --work W init --bin demo_cpc.bin --org 0x4000
+python3 agent/z80_drive.py --work W status                 # Routinen in Reihenfolge, was offen ist, was als Nächstes kommt
+python3 agent/z80_drive.py --work W show 0x401C            # der Auftragstext, den ein Modell bekäme (--system: auch die Anweisungen)
+python3 agent/z80_drive.py --work W tool run_routine '{"addr":"0x401C","registers":{"HL":"0x5000"},"memory":[{"addr":"0x5000","text":"Hi"}]}'
+python3 agent/z80_drive.py --work W tool document_routine '{"addr":"0x401C","name":"print_string","summary":"…","inputs":"HL = text","outputs":"none","clobbers":"AF HL","confidence":"high"}'
+python3 agent/z80_drive.py --work W finish 0x401C          # streng: erst, wenn nichts mehr fehlt (--accept-gaps: die Regel des Orchestrators)
+python3 agent/z80_drive.py --work W listing --out kommentiert.asm
+python3 agent/z80_drive.py --work W report
+```
+
+Screenshots (`run_routine` mit `"screenshot": true`, Werkzeug `screenshot`) landen als `W/shot_N.png`.
+
+## Was die Analyse erkennt
+
+### Sprungtabellen
+
+Code, der nur über einen berechneten Sprung erreicht wird, fand die Analyse früher nicht. Jetzt erkennt sie:
+
+- **Adresstabellen hinter einem Verteiler**: `LD HL,tabelle` … `LD E,(HL)` / `INC HL` / `LD D,(HL)` / `EX DE,HL` / `JP (HL)` (auch `JP (IX)`,
+  `JP (IY)` und `PUSH HL` / `RET`); die Tabelle endet vor dem nächsten Verweis, Sprungziel oder dem ersten Ziel hinter ihr. Ihre Einträge werden als
+  Code verfolgt, die Tabellenbytes werden nie als Code dekodiert.
+- **Reihen von `JP nn`**, in die ein berechnetes `JP (HL)` springt (`LD DE,tabelle` / `ADD HL,DE` / `JP (HL)`).
+- **Vorschläge**: drei oder mehr Codeadressen hintereinander hinter einem bloßen Datenverweis (`LD HL,vektoren`) könnten auch Zahlen sein; sie
+  werden nur vorgeschlagen (`followed:false`). Der Orchestrator markiert sie selbst als `pointers` und analysiert neu (`--no-auto-tables` schaltet
+  das ab); ein von Hand oder vom Modell als `pointers` markierter Bereich wird immer verfolgt.
+
+Die Fälle einer Tabelle sind **eigene Routinen** (`via_table`; der Auftragstext sagt „reached through the jump table at …“). Im Listing steht über
+der Tabelle ein Kommentar, die Einträge erscheinen als `DW sub_4038,sub_403E,…`. Auch `z80tool dis` folgt den Tabellen.
+
+### Datentypen (`data_regions`)
+
+Für Bytes, die weder Code noch annotiert sind:
+
+- **Strings**: druckbare Zeichen mit NUL am Ende oder mit Bit 7 im letzten Zeichen (die CPC-Konvention), referenziert oder lang genug; das Listing
+  schreibt sie als `DB "Hello",&0D,&00` bzw. `DB "Worl",'d'+&80`, ein String je Zeile.
+- **Tabellen von String-Zeigern** (auch auf kurze Strings wie „No“), samt der Strings; sie werden vor den Strings gesucht, weil das High-Byte einer
+  Adresse oft druckbar ist (&40 = `@`).
+- **Zahlentabellen**: `LD HL,tabelle` und danach ein wortweiser Zugriff `LD r,(HL)` / `INC HL` / `LD r,(HL)`, auch in der Routine, die per `CALL`
+  direkt danach aufgerufen wird (die Tabelle wird oft in HL übergeben).
+- **16-Bit-Variablen**: eine Speicherstelle, auf die der Code nur mit 16-Bit-Ladebefehlen zugreift (`LD HL,(nn)`, `LD (nn),DE`) und deren Adresse
+  nirgends geladen wird. Bytes sagen nichts (das zeigt das Listing ohnehin).
+- **Nullbereiche** ab 16 Byte (das Listing schreibt `DS n,&00`; keine Annotation nötig).
+
+Der Orchestrator übernimmt die Vorschläge selbst (`--no-auto-data` schaltet das ab). Sie sind Vermutungen: `remove_annotation` nimmt einen falschen
+Bereich zurück.
+
+### Referenzen, Konstanten, Namen mit Versatz
+
+- Unter dem Listing einer Routine steht im Auftragstext **„Referenced from this routine“**: worauf ihre Operanden zeigen, mit Art und Inhalt
+  (`0x40A5 data_40A5 (text, 10 bytes): "Z80 demo\r"`, Zahlentabellen mit ihren Werten, Bildschirmadressen); das Modell sieht so den Text hinter einer
+  nackten Adresse.
+- Ein 16-Bit-Wert, der zufällig einer Adresse im Programm gleicht, aber eine Zahl ist (`LD BC,&0506`), bekommt mit `mark_constant` keinen Platzhalter.
+- Adressen in benannten Variablen und Datenbereichen erscheinen als `name+versatz`, ab 10 hexadezimal (`spieler+&26`).
+
+### Routinen: Tail-Calls und Blöcke
+
+Ein Sprung zum Anfang einer **anderen** Routine (`JP print` am Ende eines Falls) ist ein **Tail-Call**: Das Ziel ist ein Aufgerufener, nicht Teil
+der Routine, und der Sprung zählt bei ihm als Aufrufer. Was eine Routine wirklich umfasst, beschreiben ihre **Blöcke** (`blocks`): Ein gemeinsamer
+Ausgang weit hinten ist ein eigener Block, ohne dass die Hülle die Nachbarn mitnimmt. Auftragstext („size: 11 bytes in 2 parts“), Größe und
+Vollständigkeitsprüfung benutzen die Blöcke.
 
 ## Was im Listing automatisch passiert
 
@@ -232,8 +323,10 @@ Echte Modelle machen Formatfehler; der Orchestrator fängt die häufigen ab (all
   liefert „keine Taste“, Eingaben an laufende Programme gibt es noch nicht.
 - Der Vsync des PPI ist ein einfaches Zeitmodell (79 872 T-States je Bild); Programme, die auf exakte
   Rasterpositionen warten, laufen damit nicht korrekt.
-- Die Analyse folgt Sprüngen statisch; Code, der nur über berechnete Sprünge (`JP (HL)`) erreicht wird,
-  muss als weiterer `--entry` angegeben werden.
+- Die Analyse folgt Sprüngen statisch. Berechnete Sprünge über Tabellen erkennt sie in den üblichen Formen (siehe oben); Code, der auf andere Weise
+  erreicht wird (selbst gebaute Adressen, `RST`-Verteiler mit Daten dahinter), muss als weiterer `--entry` angegeben oder als `pointers` markiert
+  werden. Eine Tabelle, die nur als Zeiger weitergereicht wird, ohne dass Code sie wortweise liest, erkennt die Datentyp-Suche nicht.
+- Gepackte Programme: siehe [unpacking.md](unpacking.md).
 - Die Qualität der Namen und Kommentare hängt am Modell. Das Verfahren stellt nur sicher, dass sie das
   Programm nicht verändern und dass das Modell seine Behauptungen am laufenden Code prüfen *kann*.
 

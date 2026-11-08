@@ -72,6 +72,15 @@ Kopien der Rotationsbefehle mit Zielregister (`RLC (IX+d),B`).
 | `DS`, `DEFS` `anzahl[,fuell]`  | `anzahl` Bytes reservieren, gefüllt mit `fuell` (Standard `0`)                 |
 | `END`                          | Assemblierung beenden; Zeilen danach werden ignoriert                          |
 
+## Optimierung (`-O`)
+
+Mit `z80tool asm -O` (Protokoll: `"optimize": true`) wird `JP nn` bzw. `JP NZ/Z/NC/C,nn` zu `JR`, wenn das Ziel in Reichweite liegt
+(−128…+127 Byte hinter dem Befehl): zwei statt drei Byte, gleiche Wirkung, nur die T-States unterscheiden sich (`JR` ist bei genommenem Sprung
+langsamer). `JP PO/PE/P/M` und `JP (HL)` bleiben, ebenso ein von Hand geschriebenes `JR`. Weil kürzere Sprünge andere Ziele näher rücken, wird so
+lange neu assembliert, bis sich nichts mehr ändert; eine Entscheidung für `JR` wird höchstens einmal zurückgenommen (wenn das Ziel doch aus der
+Reichweite rückt), so dass die Durchläufe immer enden. Standardmäßig aus. Getestet mit 3000 Zufallsprogrammen: optimiert und nicht optimiert
+erreichen Befehl für Befehl denselben Zustand (`tests/test_optimize.cpp`).
+
 ## Beispiel
 
 ```asm

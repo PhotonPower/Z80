@@ -39,6 +39,7 @@ endfunction()
 
 # ---- core library ---------------------------------------------------------------------
 add_library(z80core STATIC
+  src/analysis.cpp
   src/annotations.cpp
   src/assembler.cpp
   src/cpc.cpp
@@ -46,6 +47,7 @@ add_library(z80core STATIC
   src/cpu.cpp
   src/decoder.cpp
   src/disassembler.cpp
+  src/dsk.cpp
   src/encoder.cpp
   src/expression.cpp
   src/format.cpp

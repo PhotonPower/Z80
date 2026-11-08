@@ -65,10 +65,20 @@ public:
 private:
     // ---- names ----------------------------------------------------------------------------
     bool inRange(Word a) const { return a >= from_ && a <= to_; }
+    /// Addresses that get an automatic name: the listed range and the rest of the program.
+    bool nameable(Word a) const { return inRange(a) || (options_.program && a >= options_.program->first && a <= options_.program->second); }
+    /// An automatic name for an address that may lie outside the listed range (then it is remembered for an EQU line).
+    std::optional<std::string> autoNameAnywhere(Word a) {
+        if (!nameable(a)) return std::nullopt;
+        auto n = autoName(a);
+        if (n && !inRange(a)) outside_.emplace(*n, a);
+        return n;
+    }
     bool isTarget(Word a) const { return dis_.callers().count(a) != 0 || dis_.jumpers().count(a) != 0; }
+    bool isEntry(Word a) const { return dis_.callers().count(a) != 0 || options_.entries.count(a) != 0; }
     std::optional<std::string> autoName(Word a) const {
-        if (dis_.callers().count(a)) return "sub_" + h4(a);
-        if (dis_.jumpers().count(a)) return "loc_" + h4(a);
+        if (isEntry(a)) return "sub_" + h4(a);
+        if (dis_.jumpers().count(a) || options_.targets.count(a)) return "loc_" + h4(a);
         if (dataRefs_.count(a)) return "data_" + h4(a);
         return std::nullopt;
     }
@@ -76,11 +86,20 @@ private:
     void collectDataRefs() {
         DecodeOptions options;
         options.operandSymbolizer = [this](Word v, bool memory) -> std::optional<std::string> {
-            if (inRange(v) && (memory || v >= 0x0100) && !dis_.isCovered(v) && !ann_.nameAt(v)) dataRefs_.insert(v);
+            if (nameable(v) && (memory || v >= 0x0100) && !dis_.isCovered(v) && !ann_.expressionFor(v)) dataRefs_.insert(v);
             return std::nullopt;
         };
         for (std::size_t a = from_; a <= to_; ++a) {
-            if (dis_.isInstructionStart(static_cast<Word>(a))) decode(ram_, static_cast<Word>(a), options);
+            // a marked constant is a number, not an address: no label for it
+            if (dis_.isInstructionStart(static_cast<Word>(a)) && !ann_.isConstant(static_cast<Word>(a))) decode(ram_, static_cast<Word>(a), options);
+        }
+        // the entries of a pointer table point at something that deserves a name (strings, code)
+        for (const auto& [start, region] : ann_.dataRegions()) {
+            if (region.kind != DataKind::Pointers) continue;
+            for (unsigned p = start; p + 1 < static_cast<unsigned>(start) + region.length; p += 2) {
+                const Word v = ram_.read16(static_cast<Word>(p));
+                if (nameable(v) && !dis_.isCovered(v) && !ann_.expressionFor(v)) dataRefs_.insert(v);
+            }
         }
     }
     /// Label that is *defined* at `a` inside the listing (primary name).
@@ -95,9 +114,7 @@ private:
 
     std::optional<std::string> branchSymbol(Word target) {
         if (auto n = ann_.nameAt(target)) return n;
-        if (inRange(target)) {
-            if (auto n = autoName(target)) return n;
-        }
+        if (auto n = autoNameAnywhere(target)) return n;
         if (options_.platformSymbols) {
             if (auto fw = cpc::firmwareName(target)) {
                 usedFirmware_.emplace(*fw, target);
@@ -108,11 +125,10 @@ private:
     }
 
     std::optional<std::string> operandSymbol(Word value, bool memory) {
+        if (constantLine_) return std::nullopt;               // marked as a number by the user or the model
         if (!memory && value < 0x0100) return std::nullopt;  // small constants are rarely addresses
         if (auto e = ann_.expressionFor(value)) return e;
-        if (inRange(value)) {
-            if (auto n = autoName(value)) return n;
-        }
+        if (auto n = autoNameAnywhere(value)) return n;
         if (!memory && options_.platformSymbols) {
             if (auto fw = cpc::firmwareName(value)) {
                 usedFirmware_.emplace(*fw, value);
@@ -140,12 +156,14 @@ private:
     std::set<Word> dataRefs_;
     std::map<std::string, Word> usedFirmware_;
     std::map<std::string, Word> usedPorts_;
+    std::map<std::string, Word> outside_;  // automatic names used for addresses outside [from, to]
     std::optional<Word> port_;        // port number currently held in BC (from LD BC,nn / LD B,n)
     bool portLowKnown_ = false;       // low byte (= value of C) is known
     std::optional<Byte> knownA_;      // A after an immediate load
     std::optional<Word> knownHl_;     // HL after an immediate load
     bool jpAtVector_ = false;         // a JP opcode (&C3) was just stored at &0038
     std::size_t userComments_ = 0;
+    bool constantLine_ = false;       // the instruction being decoded holds a marked constant
     void resetContext() {
         port_.reset();
         knownA_.reset();
@@ -161,9 +179,7 @@ public:
 
 std::string Builder::wordText(Word value) {
     if (auto e = ann_.expressionFor(value)) return *e;
-    if (inRange(value)) {
-        if (auto n = autoName(value)) return *n;
-    }
+    if (auto n = autoNameAnywhere(value)) return *n;
     if (options_.platformSymbols) {
         if (auto fw = cpc::firmwareName(value)) {
             usedFirmware_.emplace(*fw, value);
@@ -208,7 +224,11 @@ std::vector<std::string> Builder::headerFor(Word a) {
         ++userComments_;
     }
     const RoutineDoc* doc = ann_.routineAt(a);
-    const bool isCall = dis_.callers().count(a) != 0;
+    if (auto note = options_.notes.find(a); note != options_.notes.end()) {
+        out.push_back("");
+        for (const auto& l : wrapText(note->second, 76)) out.push_back("; " + l);
+    }
+    const bool isCall = isEntry(a);
     if (doc || isCall) {
         out.push_back("");
         out.push_back("; " + std::string(75, '-'));
@@ -232,7 +252,7 @@ std::vector<std::string> Builder::headerFor(Word a) {
             }
             ++commented_;
         }
-        if (options_.showXrefs && isCall) {
+        if (options_.showXrefs && dis_.callers().count(a)) {
             std::string refs;
             int n = 0;
             for (Word c : dis_.callers().at(a)) {
@@ -306,7 +326,9 @@ void Builder::codeLine(Word a, Line& line) {
     options.style = NumberStyle::Ampersand;
     options.symbolizer = [this](Word t) { return branchSymbol(t); };
     options.operandSymbolizer = [this](Word v, bool memory) { return operandSymbol(v, memory); };
+    constantLine_ = ann_.isConstant(a);
     const Instruction ins = decode(ram_, a, options);
+    constantLine_ = false;
 
     // Is a port access (OUT (C),r / IN r,(C)) coming up before B/C are changed again?
     auto portAccessAhead = [&] {
@@ -434,7 +456,7 @@ void Builder::codeLine(Word a, Line& line) {
 void Builder::dataRegionLines(const DataRegion& region, std::size_t& index) {
     const std::size_t end = std::min<std::size_t>(static_cast<std::size_t>(region.address) + region.length, static_cast<std::size_t>(to_) + 1);
     std::size_t a = region.address;
-    const std::size_t perRow = region.kind == DataKind::Words || region.kind == DataKind::Pointers ? 4 : (region.kind == DataKind::Text ? 24 : 8);
+    const std::size_t perRow = region.kind == DataKind::Words || region.kind == DataKind::Pointers ? 4 : (region.kind == DataKind::Text ? 40 : 8);
     const std::size_t unit = region.kind == DataKind::Words || region.kind == DataKind::Pointers ? 2 : 1;
     bool first = true;
     while (a < end) {
@@ -449,7 +471,23 @@ void Builder::dataRegionLines(const DataRegion& region, std::size_t& index) {
             first = false;
         }
         if (auto label = labelAt(line.address)) line.before.push_back(*label + ":");
-        const std::size_t n = std::min(perRow * unit, end - a);
+        std::size_t n = std::min(perRow * unit, end - a);
+        // a row never runs across a label (a pointer into the region): the label must start a line
+        for (std::size_t i = unit; i < n; i += unit) {
+            if (labelAt(static_cast<Word>(a + i)) || ann_.commentAt(static_cast<Word>(a + i))) {
+                n = i;
+                break;
+            }
+        }
+        if (region.kind == DataKind::Text) {  // one string per row: the row ends with its terminator (NUL or a character with bit 7 set)
+            for (std::size_t i = 0; i + 1 < n; ++i) {
+                const Byte b = ram_.readRam(static_cast<Word>(a + i));
+                if (b == 0 || b >= 0x80) {
+                    n = i + 1;
+                    break;
+                }
+            }
+        }
         std::vector<Byte> bytes;
         for (std::size_t i = 0; i < n; ++i) bytes.push_back(ram_.readRam(static_cast<Word>(a + i)));
         if (unit == 2 && n % 2 == 0) {
@@ -564,12 +602,15 @@ ListingResult Builder::build() {
     std::set<Word> autoNeeded(dataRefs_);
     for (const auto& [t, refs] : dis_.callers()) (void)refs, autoNeeded.insert(t);
     for (const auto& [t, refs] : dis_.jumpers()) (void)refs, autoNeeded.insert(t);
+    autoNeeded.insert(options_.entries.begin(), options_.entries.end());
+    autoNeeded.insert(options_.targets.begin(), options_.targets.end());
     std::size_t autoCount = 0;
     for (Word t : autoNeeded) {
         if (!inRange(t) || ann_.nameAt(t)) continue;
         if (lineStarts.count(t) == 0) extraEqus.emplace(*autoName(t), std::make_pair(t, std::string("branch target inside an instruction or data row")));
         else ++autoCount;
     }
+    for (const auto& [name, a] : outside_) extraEqus.emplace(name, std::make_pair(a, std::string("outside this range")));
 
     // ---- output ----
     std::ostringstream out;
@@ -578,6 +619,11 @@ ListingResult Builder::build() {
     out << "; " << title << "\n";
     out << "; Range &" << h4(from_) << "-&" << h4(to_) << "   (generated by z80tool; re-assemblable)\n";
     out << "; " << std::string(75, '=') << "\n";
+    if (!options_.equates) {
+        usedFirmware_.clear();
+        usedPorts_.clear();
+        extraEqus.clear();
+    }
     if (!usedFirmware_.empty()) {
         out << "\n; --- Amstrad CPC firmware entry points used ---\n";
         std::map<Word, std::string> byAddr;

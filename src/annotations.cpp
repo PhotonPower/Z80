@@ -37,6 +37,17 @@ Word parseAddress(const Json& j, const char* what) {
     throw JsonError(std::string(what) + ": invalid address");
 }
 
+const Json& need(const Json& j, const char* key, const char* what) {
+    const Json* v = j.isObject() ? j.find(key) : nullptr;
+    if (!v) throw JsonError(std::string(what) + ": missing '" + key + "'");
+    return *v;
+}
+
+std::int64_t intOf(const Json& j, const char* what) {
+    if (!j.isNumber()) throw JsonError(std::string(what) + ": a number is expected");
+    return j.asInt();
+}
+
 std::string strOr(const Json& j, const char* key) {
     const Json* v = j.find(key);
     return v && v->isString() ? v->asString() : std::string();
@@ -134,17 +145,22 @@ std::optional<std::string> Annotations::setData(const DataRegion& r) {
 }
 
 bool Annotations::removeLabel(Word address) {
-    auto it = labels_.find(address);
-    if (it == labels_.end()) return false;
-    byName_.erase(upperCase(it->second));
-    labels_.erase(it);
-    routines_.erase(address);
-    std::erase_if(variables_, [&](const VariableDoc& v) { return v.address == address; });
-    if (auto d = data_.find(address); d != data_.end()) d->second.name.clear();
-    return true;
+    bool any = false;
+    if (auto it = labels_.find(address); it != labels_.end()) {
+        byName_.erase(upperCase(it->second));
+        labels_.erase(it);
+        any = true;
+    }
+    any = routines_.erase(address) > 0 || any;
+    any = std::erase_if(variables_, [&](const VariableDoc& v) { return v.address == address; }) > 0 || any;
+    // a wrong mark_data must be undoable: the region goes, not only its name
+    any = data_.erase(address) > 0 || any;
+    return any;
 }
 
-bool Annotations::removeComment(Word address) { return comments_.erase(address) + blockComments_.erase(address) > 0; }
+bool Annotations::removeComment(Word address) {
+    return comments_.erase(address) + blockComments_.erase(address) + constants_.erase(address) > 0;
+}
 
 void Annotations::clear() { *this = Annotations{}; }
 
@@ -153,15 +169,28 @@ std::optional<std::string> Annotations::nameAt(Word address) const {
     return std::nullopt;
 }
 
+namespace {
+/// The offset of "name+offset", written like the other numbers of a listing: hexadecimal ("&26"); below ten the digit is
+/// the same in both bases and stays bare ("2").
+std::string plusOffset(unsigned offset) { return offset < 10 ? std::to_string(offset) : "&" + hexDigits(offset, offset > 0xFF ? 4 : 2); }
+}  // namespace
+
 std::optional<std::string> Annotations::expressionFor(Word address) const {
     if (auto exact = nameAt(address)) return exact;
     for (const auto& v : variables_) {
-        if (address > v.address && address < v.address + v.size) return v.name + "+" + std::to_string(address - v.address);
+        if (address > v.address && address < v.address + v.size) return v.name + "+" + plusOffset(address - v.address);
     }
     for (const auto& [start, region] : data_) {
-        if (!region.name.empty() && address > start && address < start + region.length) return region.name + "+" + std::to_string(address - start);
+        if (!region.name.empty() && address > start && address < start + region.length) return region.name + "+" + plusOffset(address - start);
     }
     return std::nullopt;
+}
+
+const DataRegion* Annotations::dataCovering(Word address) const {
+    auto it = data_.upper_bound(address);
+    if (it == data_.begin()) return nullptr;
+    --it;
+    return static_cast<unsigned>(address) < static_cast<unsigned>(it->first) + it->second.length ? &it->second : nullptr;
 }
 
 std::optional<Word> Annotations::addressOf(const std::string& name) const {
@@ -226,6 +255,9 @@ Json Annotations::toJson() const {
     Json blocks = Json::object();
     for (const auto& [a, text] : blockComments_) blocks.set(hex4(a), text);
     j.set("block_comments", blocks);
+    Json constants = Json::array();
+    for (Word a : constants_) constants.push(hex4(a));
+    j.set("constants", constants);
     return j;
 }
 
@@ -237,20 +269,25 @@ Annotations Annotations::fromJson(const Json& j) {
     };
     a.title_ = strOr(j, "title");
     if (const Json* labels = j.find("labels"); labels && labels->isObject()) {
-        for (const auto& [key, value] : labels->members()) check(a.setLabel(parseAddress(Json(key), "label"), value.asString()));
+        for (const auto& [key, value] : labels->members()) {
+            if (!value.isString()) throw JsonError("label names must be strings");
+            check(a.setLabel(parseAddress(Json(key), "label"), value.asString()));
+        }
     }
     if (const Json* routines = j.find("routines"); routines && routines->isArray()) {
         for (const Json& e : routines->items()) {
             RoutineDoc d{strOr(e, "name"), strOr(e, "summary"), strOr(e, "inputs"), strOr(e, "outputs"), strOr(e, "clobbers"), strOr(e, "confidence")};
-            check(a.setRoutine(parseAddress(*e.find("address"), "routine"), d));
+            check(a.setRoutine(parseAddress(need(e, "address", "routine"), "routine"), d));
         }
     }
     if (const Json* vars = j.find("variables"); vars && vars->isArray()) {
         for (const Json& e : vars->items()) {
             VariableDoc v;
-            v.address = parseAddress(*e.find("address"), "variable");
+            v.address = parseAddress(need(e, "address", "variable"), "variable");
             v.name = strOr(e, "name");
-            v.size = e.find("size") ? static_cast<unsigned>(e.find("size")->asInt()) : 1u;
+            const std::int64_t size = e.find("size") ? intOf(*e.find("size"), "variable size") : 1;
+            if (size < 1 || size > 0x4000) throw JsonError("variable size must be between 1 and 16384 bytes");
+            v.size = static_cast<unsigned>(size);
             v.comment = strOr(e, "comment");
             check(a.setVariable(v));
         }
@@ -258,8 +295,10 @@ Annotations Annotations::fromJson(const Json& j) {
     if (const Json* data = j.find("data"); data && data->isArray()) {
         for (const Json& e : data->items()) {
             DataRegion r;
-            r.address = parseAddress(*e.find("address"), "data");
-            r.length = static_cast<unsigned>(e.find("length")->asInt());
+            r.address = parseAddress(need(e, "address", "data"), "data");
+            const std::int64_t length = intOf(need(e, "length", "data"), "data length");
+            if (length < 1 || length > 0x10000) throw JsonError("invalid data region length");
+            r.length = static_cast<unsigned>(length);
             const auto kind = dataKindFromString(strOr(e, "kind"));
             if (!kind) throw JsonError("unknown data kind '" + strOr(e, "kind") + "'");
             r.kind = *kind;
@@ -269,10 +308,19 @@ Annotations Annotations::fromJson(const Json& j) {
         }
     }
     if (const Json* c = j.find("comments"); c && c->isObject()) {
-        for (const auto& [key, value] : c->members()) a.setComment(parseAddress(Json(key), "comment"), value.asString());
+        for (const auto& [key, value] : c->members()) {
+            if (!value.isString()) throw JsonError("comments must be strings");
+            a.setComment(parseAddress(Json(key), "comment"), value.asString());
+        }
     }
     if (const Json* c = j.find("block_comments"); c && c->isObject()) {
-        for (const auto& [key, value] : c->members()) a.setBlockComment(parseAddress(Json(key), "block comment"), value.asString());
+        for (const auto& [key, value] : c->members()) {
+            if (!value.isString()) throw JsonError("block comments must be strings");
+            a.setBlockComment(parseAddress(Json(key), "block comment"), value.asString());
+        }
+    }
+    if (const Json* c = j.find("constants"); c && c->isArray()) {
+        for (const Json& e : c->items()) a.setConstant(parseAddress(e, "constant"), true);
     }
     return a;
 }

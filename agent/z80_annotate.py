@@ -141,11 +141,24 @@ class Ollama:
         raise last
 
 
+def has_amsdos_header(path):
+    """True if the file starts with a valid AMSDOS header (checksum over bytes 0-66 in bytes 67-68)."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(128)
+    except OSError:
+        return False
+    if len(head) < 128:
+        return False
+    total = sum(head[:67])
+    return total != 0 and total & 0xFFFF == head[67] | head[68] << 8
+
+
 def check_server(server):
     """The orchestrator relies on features of the C++ side; an old build would fail in confusing ways."""
     reply = server.call(cmd="info")
-    if not reply.get("ok") or reply.get("protocol", 0) < 3:
-        raise ServerError("your z80tool is outdated (it lacks features this script needs, e.g. the idiom comments and the completeness check). "
+    if not reply.get("ok") or reply.get("protocol", 0) < 4:
+        raise ServerError("your z80tool is outdated (it lacks features this script needs, e.g. jump tables, data regions and references). "
                           "Rebuild it:  cmake --build build   (after git pull)")
 
 
@@ -172,15 +185,22 @@ TOOLS = [
         "restored afterwards unless keep_state is true. Use this to TEST your hypotheses instead of guessing.",
         {"addr": ADDR,
          "registers": {"type": "object", "description": 'Initial registers, e.g. {"A": 5, "HL": "0x4100"}'},
-         "memory": {"type": "array", "description": 'Memory to set up first: [{"addr": "0x4100", "hex": "48454C4C4F00"}]',
-                    "items": {"type": "object", "properties": {"addr": ADDR, "hex": {"type": "string"}}}},
-         "max_instructions": {"type": "integer", "description": "default 200000"},
+         "memory": {"type": "array", "description": 'Memory to set up first: [{"addr": "0x4100", "hex": "48454C4C4F00"}] or, for a string, '
+                                                    '[{"addr": "0x4100", "text": "HELLO"}] (a NUL terminator is added unless "nul" is false)',
+                    "items": {"type": "object", "properties": {"addr": ADDR, "hex": {"type": "string"}, "text": {"type": "string"}, "nul": {"type": "boolean"}}}},
+         "setup": {"type": "array", "description": 'Routines to run FIRST on the same machine, e.g. the program entry that initialises variables: '
+                                                  '[{"addr": "0x4000"}] (optional "registers"). Their output, firmware calls and memory changes are not part of the report.',
+                   "items": {"type": "object", "properties": {"addr": ADDR, "registers": {"type": "object"}}}},
+         "max_instructions": {"type": "integer", "description": "default 200000 (also the limit for each setup routine)"},
          "screenshot": {"type": "boolean", "description": "attach an image of the screen (zoomed to the changed area) after the run"},
          "keep_state": {"type": "boolean", "description": "keep the changes (then call reset_machine when done)"}},
         ["addr"]),
     _fn("screenshot", "Image of the current screen. Optional crop box in text cells (80 columns x 25 rows) and zoom.",
         {"col0": {"type": "integer"}, "row0": {"type": "integer"}, "col1": {"type": "integer"}, "row1": {"type": "integer"},
          "zoom": {"type": "integer"}}),
+    _fn("remove_annotation", "Remove what you annotated at an address: its name, documentation, variable, data region, comment and constant mark "
+                             "(e.g. to undo a wrong mark_data or name).",
+        {"addr": ADDR}, ["addr"]),
     _fn("reset_machine", "Restore the machine to the state it had when the analysis started.", {}),
     _fn("name_label", "Give an address (code or data) a meaningful name, e.g. a loop or entry point.",
         {"addr": ADDR, "name": {"type": "string", "description": "snake_case, ASCII, unique"}}, ["addr", "name"]),
@@ -196,12 +216,18 @@ TOOLS = [
     _fn("name_variable", "Name a memory location the code reads/writes (variable, flag, pointer, buffer, table).",
         {"addr": ADDR, "name": {"type": "string"}, "size": {"type": "integer", "description": "bytes, default 1"},
          "comment": {"type": "string", "description": "meaning and unit"}}, ["addr", "name"]),
-    _fn("mark_data", "Declare a range as data (not code) and how to display it.",
-        {"addr": ADDR, "length": {"type": "integer"}, "kind": {"type": "string", "enum": ["bytes", "words", "text", "pointers"]},
-         "name": {"type": "string"}, "comment": {"type": "string"}}, ["addr", "length", "kind"]),
+    _fn("mark_data", "Declare a range as data (not code) and how to display it. For kind text the length may be left out: the string ends with "
+                     "its NUL or with the character that has bit 7 set.",
+        {"addr": ADDR, "length": {"type": "integer", "description": "bytes; optional for kind text"},
+         "kind": {"type": "string", "enum": ["bytes", "words", "text", "pointers"]},
+         "name": {"type": "string"}, "comment": {"type": "string"}}, ["addr", "kind"]),
     _fn("add_comment", "Comment for one line of code (appears behind the instruction), or a block comment above it. Use the exact address "
                        "from the LEFT COLUMN of the listing; an address inside an instruction is refused.",
         {"addr": ADDR, "text": {"type": "string"}, "block": {"type": "boolean"}}, ["addr", "text"]),
+    _fn("mark_constant", "Mark the instruction at an address as one whose 16-bit operand is a plain NUMBER, not an address (a size, a count, "
+                         "a pair of bytes such as LD BC,&0506): the listing then neither invents a label (data_XXXX) for the value nor names it. "
+                         "Use the address of the instruction itself; remove=true takes the mark back.",
+        {"addr": ADDR, "remove": {"type": "boolean"}}, ["addr"]),
     _fn("finish_routine", "Call when the routine is fully documented and commented.", {"summary": {"type": "string"}}),
 ]
 
@@ -352,6 +378,29 @@ def norm_addr(value):
     return v
 
 
+def ascii_of(hex_text):
+    """` "ABCD"` behind a hex dump if the bytes are mostly text, else nothing (bit 7 is ignored: CPC strings end with it set)."""
+    try:
+        data = bytes.fromhex(hex_text)
+    except ValueError:
+        return ""
+    if not data or sum(1 for b in data if 0x20 <= (b & 0x7F) < 0x7F or b in (10, 13)) * 2 < len(data):
+        return ""
+    return ' "' + "".join(chr(b & 0x7F) if 0x20 <= (b & 0x7F) < 0x7F else {10: "\\n", 13: "\\r"}.get(b, ".") for b in data) + '"'
+
+
+def touched_names(objects, address, length):
+    """`  [name, name+2]`: which named variables or data regions a changed range of memory lies in (empty if none is named)."""
+    hits = [(start, name) for start, size, name in objects if address < start + size and address + length > start]
+    if not hits:
+        return ""
+    return "  [" + ", ".join(name if address <= start else f"{name}+{address - start}" for start, name in sorted(hits)[:4]) + "]"
+
+
+def to_int(hex_text):
+    return int(hex_text, 16)
+
+
 def trim(text, limit):
     return text if len(text) <= limit else text[:limit] + f"\n... [{len(text) - limit} more characters cut]"
 
@@ -367,6 +416,9 @@ class Tools:
         self.vision = True
         self.images = []           # base64 PNGs waiting to be shown to the model
         self.finished = False
+        self.blocks = None         # the routine's own code as [(first, end), ...] (end exclusive)
+        self.strict = False        # True: finish_routine accepts a routine only if nothing is missing (no "second call is final")
+        self.program = None        # (first, end) of the loaded program, end exclusive
 
     def reset_routine(self):
         self.images.clear()
@@ -396,7 +448,7 @@ class Tools:
 
     # ---- reading ----
     def t_get_listing(self, **a):
-        r = self.s.ok(cmd="listing", verify=False, addresses=True, max_chars=24000, **{"from": norm_addr(a["from"]), "to": norm_addr(a["to"])})
+        r = self.s.ok(cmd="listing", verify=False, equates=False, addresses=True, max_chars=24000, **{"from": norm_addr(a["from"]), "to": norm_addr(a["to"])})
         return r["text"] + ("\n[listing truncated]" if r.get("truncated") else "")
 
     def t_disassemble(self, addr, count=16):
@@ -410,64 +462,98 @@ class Tools:
         return "\n".join(rows) + f'\nascii: {r["ascii"]}'
 
     # ---- running ----
-    def t_run_routine(self, addr, registers=None, memory=None, max_instructions=200000, screenshot=False, keep_state=False):
+    def t_run_routine(self, addr, registers=None, memory=None, max_instructions=200000, screenshot=False, keep_state=False, setup=None):
         s = self.s
+        limit = max(1, min(int(max_instructions), 5_000_000))  # a runaway loop must not stall the whole analysis
         s.ok(cmd="rollback", name="baseline")
+        setup_lines = []
+        for step in setup or []:
+            if not isinstance(step, dict) or "addr" not in step:
+                raise ValueError('each setup entry needs an "addr"')
+            sregs = {k: (norm_addr(v) if isinstance(v, str) else v) for k, v in (step.get("registers") or {}).items()}
+            sreply = s.call(cmd="call", addr=norm_addr(step["addr"]), regs=sregs, max_instructions=limit, irq_every_cycles=self.irq)
+            if not sreply.get("ok"):
+                return f"error: setup routine {step['addr']}: {sreply.get('error')}"
+            setup_lines.append(f'setup {step["addr"]}: {"returned" if sreply.get("returned") else "did NOT return (stop: " + sreply["stop"] + ")"}, '
+                               f'{sreply["instructions"]} instructions')
+        caller_ranges = []
         for m in memory or []:
-            if not isinstance(m, dict) or "addr" not in m or "hex" not in m:
-                raise ValueError('each memory entry needs "addr" and "hex"')
-            digits = re.sub(r"0x|[\s,]", "", str(m["hex"]), flags=re.I)
+            if not isinstance(m, dict) or "addr" not in m or ("hex" not in m and "text" not in m):
+                raise ValueError('each memory entry needs "addr" and "hex" (or "text")')
+            if "hex" in m:
+                digits = re.sub(r"0x|[\s,]", "", str(m["hex"]), flags=re.I)
+            else:
+                raw = str(m["text"]).encode("latin-1", errors="replace") + (b"" if m.get("nul") is False else b"\0")
+                digits = raw.hex()
             s.ok(cmd="write", addr=norm_addr(m["addr"]), hex=digits)
+            caller_ranges.append((to_int(s.ok(cmd="read", addr=norm_addr(m["addr"]), len=1)["addr"]), len(digits) // 2))
         regs = {k: (norm_addr(v) if isinstance(v, str) else v) for k, v in (registers or {}).items()}
+        s.ok(cmd="checkpoint", name="pre_run")  # what the routine changes is measured from here: memory the caller set up does not count
         s.ok(cmd="firmware_log", clear=True)
         s.ok(cmd="console", clear=True)
         s.ok(cmd="io")
         s.ok(cmd="screen", name="_before")
-        limit = max(1, min(int(max_instructions), 5_000_000))  # a runaway loop must not stall the whole analysis
         reply = s.call(cmd="call", addr=norm_addr(addr), regs=regs, max_instructions=limit, irq_every_cycles=self.irq)
         if not reply.get("ok"):
+            s.call(cmd="drop", name="pre_run")
             return f"error: {reply.get('error')}"
-        out = [f'stop: {reply["stop"]}  returned: {reply.get("returned")}  instructions: {reply["instructions"]}  T-states: {reply["cycles"]}']
+        out = setup_lines + [f'stop: {reply["stop"]}  returned: {reply.get("returned")}  instructions: {reply["instructions"]}  T-states: {reply["cycles"]}']
         r = reply["regs"]
         out.append("registers after: " + "  ".join(f"{k}={r[k]}" for k in ("AF", "BC", "DE", "HL", "IX", "IY", "SP")) + f'  flags={r["flags"]}')
-        if reply["stop"] != "address":
+        if not reply.get("returned") and not reply.get("note"):
             out.append(f'NOTE: it did not return (stop: {reply["stop"]}). For a program entry or a main loop that is normal: the state shown is the '
                        f'state after {reply["instructions"]} instructions. Use a smaller max_instructions to look at an earlier moment.')
+        if reply.get("note"):
+            out.append("NOTE: " + reply["note"])
+        if reply.get("fetched_from_empty_memory"):
+            out.append(f'NOTE: {reply["fetched_from_empty_memory"]} instructions were fetched from EMPTY memory (zeros, first at {reply["first_empty_fetch"]}): '
+                       "the code jumped through a pointer or return address that is not set up. Routines often depend on variables that other code "
+                       "initialises: run that code first with `setup` (usually the program entry) or write the expected values with `memory`; "
+                       "otherwise the result below is meaningless.")
 
         sp = int(r["SP"], 16)
-        diff = s.ok(cmd="diff", name="baseline")
+        diff = s.ok(cmd="diff", name="pre_run")
+        s.call(cmd="drop", name="pre_run")
         shown = [x for x in diff["ranges"] if not (sp - 0x40 <= int(x["addr"], 16) < sp + 0x40)]
         screen = [x for x in shown if int(x["addr"], 16) >= 0xC000]
         other = [x for x in shown if int(x["addr"], 16) < 0xC000]
         if other:
             out.append(f"memory changed outside the screen RAM ({len(other)} ranges; stack area omitted; small ranges first):")
+            objects = self.named_objects()
             for x in sorted(other, key=lambda x: (x["len"], int(x["addr"], 16)))[:14]:
-                out.append(f'  {x["addr"]} len {x["len"]}: {x["before"][:32]} -> {x["after"][:32]}')
+                out.append(f'  {x["addr"]} len {x["len"]}: {x["before"][:32]} -> {x["after"][:32]}' + ascii_of(x["after"][:32]) +
+                           touched_names(objects, to_int(x["addr"]), x["len"]))
             if len(other) > 14:
                 out.append(f"  ... and {len(other) - 14} larger ranges (use read_memory to look at them)")
         else:
             out.append("memory changed outside the screen RAM: nothing")
         if screen:
             out.append(f"screen RAM (&C000-&FFFF) changed in {len(screen)} ranges, {sum(x['len'] for x in screen)} bytes")
+        out += self.write_notes(other, caller_ranges)
 
         fw = s.ok(cmd="firmware_log")["calls"]
         if fw:
-            out.append("firmware calls (stubbed): " + "; ".join(f'{c["name"]}(A={c["A"]},BC={c["BC"]},DE={c["DE"]},HL={c["HL"]})' for c in fw[:12]) + (" ..." if len(fw) > 12 else ""))
+            out.append("firmware calls (stubbed): " + "; ".join(f'{c["name"]}(A={c["A"]},BC={c["BC"]},DE={c["DE"]},HL={c["HL"]})'
+                                                             + (f' from {c["call_site"]}' if c.get("call_site") else "") for c in fw[:12])
+                       + (" ..." if len(fw) > 12 else ""))
         text = s.ok(cmd="console")["text"]
         if text:
             out.append(f"text printed via firmware: {text!r}")
         ports = s.ok(cmd="io")["output"]
         if ports:
-            lo, hi = (int(self.range[0], 16), int(self.range[1], 16)) if self.range else (0, 0)
-            own = [p for p in ports if lo <= int(p["pc"], 16) <= hi]
-            other = [p for p in ports if not lo <= int(p["pc"], 16) <= hi]
+            spans = self.blocks or ([(self.range[0], f'0x{int(self.range[1], 16) + 1:04X}')] if self.range else [])
+
+            def mine(p):
+                return any(int(b0, 16) <= int(p["pc"], 16) < int(b1, 16) for b0, b1 in spans)
+            own = [p for p in ports if mine(p)]
+            other_ports = [p for p in ports if not mine(p)]
             out.append(f"hardware port writes: {len(ports)} in total - {len(own)} by this routine's own OUT instructions, "
-                       f"{len(other)} by the code it calls (do NOT attribute those to this routine's OUT lines):")
-            for label, group, limit in (("this routine", own, 10), ("called code", other, 5)):
-                for p in group[:limit]:
+                       f"{len(other_ports)} by the code it calls (do NOT attribute those to this routine's OUT lines):")
+            for label, group, cap in (("this routine", own, 10), ("called code", other_ports, 5)):
+                for p in group[:cap]:
                     out.append(f'  {p["port"]}<-{p["value"]} written at {p["pc"]} [{label}]' + (f' {p["what"]}' if "what" in p else ""))
-                if len(group) > limit:
-                    out.append(f"  ... and {len(group) - limit} more from {label}")
+                if len(group) > cap:
+                    out.append(f"  ... and {len(group) - cap} more from {label}")
 
         d = s.ok(cmd="screen_diff", a="_before")
         if d.get("changed_pixels", 0) == 0:
@@ -495,6 +581,35 @@ class Tools:
             out.append("state kept; call reset_machine to restore.")
         return "\n".join(out)
 
+    def named_objects(self):
+        """(address, size, name) of the variables and named data regions annotated so far."""
+        ann = self.s.ok(cmd="ann_list")["annotations"]
+        objects = [(to_int(v["address"]), max(1, v.get("size", 1)), v["name"]) for v in ann.get("variables", []) if v.get("name")]
+        objects += [(to_int(d["address"]), d["length"], d["name"]) for d in ann.get("data", []) if d.get("name")]
+        return objects
+
+    def write_notes(self, shown, caller_ranges=()):
+        """Writes that leave the data the routine may touch: past the end of the loaded program (a buffer overrun) or into the code of a
+        routine (self-modifying code, or an overrun)."""
+        notes = []
+        routines = None
+        for x in shown:
+            a, n = to_int(x["addr"]), x["len"]
+            if any(a >= ca and a + n <= ca + cl for ca, cl in caller_ranges):
+                continue  # inside memory the caller set up for the test: that is what it was for
+            if self.program and self.program[0] <= a < self.program[1] + 0x100 and a + n > self.program[1]:
+                notes.append(f'NOTE: the routine wrote at least up to 0x{a + n - 1:04X}, beyond the end of the loaded program (0x{self.program[1] - 1:04X}): '
+                             "a buffer overrun? (only changed bytes are seen: a zero written over a zero is not)")
+                continue
+            if routines is None:
+                routines = self.s.ok(cmd="routines")["routines"]
+            hit = next(((r, bs, be) for r in routines for bs, be in Annotator.blocks(r) if a < to_int(be) and a + n > to_int(bs)), None)
+            if hit:
+                r, bs, be = hit
+                notes.append(f'NOTE: the routine changed memory inside the code of {r["name"]} (0x{to_int(bs):04X}-0x{to_int(be) - 1:04X}) at 0x{a:04X}: '
+                             "self-modifying code (common on the Z80: a variable kept in an instruction operand), or an overrun into the code?")
+        return notes[:4]
+
     def t_screenshot(self, col0=None, row0=None, col1=None, row1=None, zoom=None):
         req = {"cmd": "screen", "name": "_view"}
         if None not in (col0, row0, col1, row1):
@@ -506,6 +621,10 @@ class Tools:
             return "(you cannot see images: this model has no vision; rely on the text summaries from run_routine)"
         self.images.append(shot["png_base64"])
         return f'(image attached: {shot["width"]}x{shot["height"]} px, screen mode {shot["mode"]})'
+
+    def t_remove_annotation(self, addr):
+        r = self.s.ok(cmd="ann_remove", addr=norm_addr(addr))
+        return "ok: removed" if r.get("removed") else "nothing was annotated at that address"
 
     def t_reset_machine(self):
         self.s.ok(cmd="rollback", name="baseline")
@@ -525,46 +644,87 @@ class Tools:
         self.s.ok(cmd="ann_variable", addr=norm_addr(addr), name=name, size=int(size), comment=comment)
         return f"ok: variable {name}"
 
-    def t_mark_data(self, addr, length, kind, name="", comment=""):
+    def t_mark_data(self, addr, kind, length=None, name="", comment=""):
+        if length is None:
+            if kind != "text":
+                raise ValueError("length is required unless kind is text (then the string ends with its NUL or bit-7 character)")
+            raw = bytes.fromhex(self.s.ok(cmd="read", addr=norm_addr(addr), len=1024)["hex"])
+            end = next((i for i, b in enumerate(raw) if b == 0 or b >= 0x80), None)
+            if end is None:
+                raise ValueError("no terminating NUL or bit-7 character within 1024 bytes: give the length")
+            length = end + 1
         self.s.ok(cmd="ann_data", addr=norm_addr(addr), length=int(length), kind=kind, name=name, comment=comment)
-        return "ok: data region marked"
+        return f"ok: data region marked ({int(length)} bytes)"
 
     def t_add_comment(self, addr, text, block=False):
         self.s.ok(cmd="ann_comment", addr=norm_addr(addr), text=text, block=bool(block))
         return "ok"
 
+    def t_mark_constant(self, addr, remove=False):
+        self.s.ok(cmd="ann_constant", addr=norm_addr(addr), remove=bool(remove))
+        return "ok: constant mark removed" if remove else "ok: constant marked"
+
     def completeness_problems(self, rng=None):
-        """What is still missing in a routine's listing (names, comments); default: the routine being processed."""
-        rng = rng or self.range
+        """What is still missing in a routine's listing (names, comments). `rng` is one (first, end) pair or a list of them (end exclusive);
+        default: the blocks of the routine being processed."""
+        if rng is None:
+            rng = self.blocks or []
+        elif rng and isinstance(rng[0], str):
+            rng = [rng]
         if not rng:
             return []
-        r = self.s.ok(cmd="listing", verify=False, max_chars=200000, **{"from": rng[0], "to": rng[1]})
-        text = r["text"]
+        texts, instructions, comments = [], 0, None
+        for first, end in rng:
+            last = f"0x{max(int(first, 16), int(end, 16) - 1):04X}"
+            part = self.s.ok(cmd="listing", verify=False, equates=False, max_chars=200000, **{"from": first, "to": last})
+            texts.append(part["text"])
+            instructions += part.get("instructions", 0)
+            if "user_comments" in part:
+                comments = (comments or 0) + part["user_comments"]
+        text = "\n".join(texts)
         problems = []
-        unnamed = re.findall(r"^((?:loc|sub|data)_[0-9a-f]{4}):", text, re.M)
+        unnamed = re.findall(r"^((?:loc|sub|data)_[0-9A-Fa-f]{4}):", text, re.M)
         if unnamed:
             problems.append(f"labels without a real name: {', '.join(unnamed[:8])}{' ...' if len(unnamed) > 8 else ''} (name_label)")
-        numeric = sorted(set(re.findall(r"\(&([0-9A-F]{4})\)", text)))
+        numeric = sorted(set(re.findall(r"\(&([0-9A-F]{4})\)", text)) | set(re.findall(r"\bdata_([0-9A-F]{4})\b", text)))
         numeric = [a for a in numeric if int(a, 16) >= 0x0040]
         if numeric:
             problems.append("memory locations used by number without a name: " + ", ".join("&" + a for a in numeric[:8]) +
-                            (" ..." if len(numeric) > 8 else "") + " (name_variable, or mark_data for tables)")
-        wanted = max(2, r["instructions"] // 10)
-        if r.get("user_comments", wanted) < wanted:
-            problems.append(f"only {r['user_comments']} comment(s) for {r['instructions']} instructions - add about {wanted} short ones with add_comment "
+                            (" ..." if len(numeric) > 8 else "") + " (name_variable, or mark_data for tables and strings)")
+        problems += self.documentation_problems()
+        wanted = min(max(2, instructions // 10), max(1, instructions // 2))  # about one per 10 instructions, but never more than one per two
+        if comments is not None and comments < wanted:
+            problems.append(f"only {comments} comment(s) for {instructions} instructions - add about {wanted} short ones with add_comment "
                             "(explain meaning and purpose of the non-obvious steps)")
         return problems
 
+    def documentation_problems(self):
+        """document_routine accepts a bare name and summary; the routine's contract is what the next reader needs."""
+        if self.current is None:
+            return []
+        doc = next((r for r in self.s.ok(cmd="routines")["routines"] if to_int(r["addr"]) == to_int(self.current)), None)
+        if not doc or not doc["documented"]:
+            return []
+        problems = []
+        missing = [k for k in ("inputs", "outputs", "clobbers") if not (doc.get(k) or "").strip()]
+        if missing:
+            problems.append(f"document_routine without {', '.join(missing)} (say \"none\" if there is nothing to say)")
+        if not doc.get("confidence"):
+            problems.append("document_routine without `confidence` (high = confirmed by a test you ran, medium = plausible from the code, low = a guess)")
+        return problems
+
     def t_finish_routine(self, summary=""):
-        still_open = {r["addr"].lower() for r in self.s.ok(cmd="routines", undocumented_only=True)["routines"]}
-        if self.current and self.current.lower() in still_open:
+        still_open = {to_int(r["addr"]) for r in self.s.ok(cmd="routines", undocumented_only=True)["routines"]}
+        if self.current and to_int(self.current) in still_open:
             return "error: call document_routine for this routine first (name, summary, inputs, outputs, clobbers)."
-        if not self.finish_warned:
+        if self.strict or not self.finish_warned:
             self.finish_warned = True
             problems = self.completeness_problems()
             if problems:
+                again = ("call finish_routine again once it is fixed" if self.strict
+                         else "then call finish_routine again (a second call is accepted as final)")
                 return ("not finished yet - the listing of this routine is still incomplete:\n- " + "\n- ".join(problems) +
-                        "\nFix this with the annotation tools, then call finish_routine again (a second call is accepted as final).")
+                        f"\nFix this with the annotation tools, {again}.")
         self.finished = True
         return "ok: routine finished"
 
@@ -589,7 +749,8 @@ How you work:
    something. Compare registers, memory changes, port writes and the screen change with what you expected. Do not guess when you can run it.
 3. Record what you learned with the annotation tools: document_routine (name, summary, inputs, outputs, clobbers), name_variable for
    every memory location that has a meaning, mark_data for tables/strings/sprites, name_label for loops and branch targets,
-   add_comment for the non-obvious lines.
+   add_comment for the non-obvious lines. A 16-bit value that is a number and not an address (a size, a count, a pair of bytes such as
+   LD BC,&0506) but shows up as data_XXXX in the listing: mark_constant on that instruction, do not name the "label".
 4. Call finish_routine when done.
 
 Z80 facts that are easy to get wrong: in `OUT (C),r` and `IN r,(C)` the port address is the FULL 16-bit register pair BC (B = high byte,
@@ -604,6 +765,18 @@ variable - name it as a table/record (size = its extent) and name the fields you
 More facts: the stack grows DOWNWARDS, so `LD SP,&C000` puts the stack in the RAM just below the screen memory (it does not use the
 screen). With interrupt mode 1 every interrupt jumps to &0038; `LD A,&C3` / `LD (&0038),A` / `LD HL,x` / `LD (&0039),HL` installs `JP x` there,
 i.e. an interrupt handler at x. Registers such as IY often point to a table of game variables; name fields you can identify, e.g. `(IY+8)`.
+
+The listing may contain "jump table" comments: the analysis found a table behind a computed jump (a row of JP instructions, or a table of
+addresses read by LD E,(HL) / INC HL / LD D,(HL) / EX DE,HL / JP (HL)). Its entries are handlers, not routines that anybody calls: describe
+what each case does and name the case labels (name_label), and give the table a name with mark_data (kind pointers; that is safe, the cases stay
+routines; remove_annotation undoes a wrong mark).
+
+Strings and tables of string pointers that the analysis recognised are already shown as text (DB "...",0 or DB "Worl",'d'+&80 - the last
+character has bit 7 set) and DW lists. Give them a meaningful name with mark_data (the same address and kind, a name) and say what they are
+used for. The task lists what the operands of the routine point at ("Referenced from this routine").
+
+A routine often depends on state that other code sets up: variables, pointers, screen mode. Run it with `setup` (usually the program entry,
+which initialises them) instead of guessing values; run_routine tells you when code ran into empty memory or did not really return.
 
 Do not finish early. Before finish_routine: give EVERY label a name (loops, branch targets still called loc_/sub_/data_), name every memory
 location the code uses (name_variable, with a comment on its meaning), mark tables and strings (mark_data) and add a short comment (add_comment)
@@ -640,8 +813,10 @@ class Annotator:
 
     def __init__(self, server, passes, args, log=None):
         self.s, self.passes, self.a, self.log = server, passes, args, log
-        self.llm = passes[0]["llm"]
+        self.llm = passes[0]["llm"] if passes else None  # no model in a dry run
         self.max_turns = args.max_turns
+        self.entries = []
+        self.header_entry = None
         self.mode = "explore"
         self.tools = Tools(server, irq=getattr(args, "irq", 0))
 
@@ -675,44 +850,146 @@ class Annotator:
             r = s.ok(cmd="load_sna", file=a.sna)
             self.say(f'snapshot loaded, PC={r["regs"]["PC"]}, screen mode {r["video"]["mode"]}')
         else:
-            s.ok(cmd="load_file", file=a.bin, addr=a.org)
+            # a file with an AMSDOS header (copied from a CPC disk, or from a .dsk directly) says itself where it belongs and where it starts
+            request = {"file": a.dsk, "name": a.dsk_file} if a.dsk else {"file": a.bin}
+            if a.org or not (a.dsk or has_amsdos_header(a.bin)):
+                request["addr"] = a.org or "0x4000"
+            r = s.ok(cmd="load_file", **request)
+            if "amsdos" in r:
+                h = r["amsdos"]
+                self.say(f'AMSDOS header: {h["name"]}, load {h["load"]}, entry {h["entry"]}, {h["length"]} bytes')
+                self.header_entry = h["entry"]
         if a.project and os.path.exists(a.project):
             n = s.ok(cmd="ann_load", file=a.project)["labels"]
             self.say(f"project loaded ({n} labels)")
-        entries = a.entry or ([a.org] if a.bin else [s.ok(cmd="regs")["regs"]["PC"]])
-        extra = {"inline_strings": a.inline_string} if a.inline_string else {}
-        r = s.ok(cmd="analyze", entries=entries, **extra)
-        self.say(f'analysed {r["instructions"]} instructions, {r["from"]}-{r["to"]}')
+        if a.entry:
+            entries = a.entry
+        elif self.header_entry:
+            entries = [self.header_entry]
+        elif a.bin:
+            entries = [a.org or "0x4000"]
+        else:
+            entries = [s.ok(cmd="regs")["regs"]["PC"]]
+        self.entries = entries
+        r = self.analyze()
+        if "program" in r:
+            self.tools.program = (to_int(r["program"]["from"]), to_int(r["program"]["to"]) + 1)
+        self.say(f'analysed {r["instructions"]} instructions, {r["from"]}-{r["to"]}'
+                 + (f', {r["jump_tables"]} jump tables' if r.get("jump_tables") else ""))
+        if not a.no_auto_tables:
+            self.follow_pointer_tables()
+        if not a.no_auto_data:
+            self.mark_data_regions()
         s.ok(cmd="checkpoint", name="baseline")
 
+    def analyze(self):
+        extra = {"inline_strings": self.a.inline_string} if self.a.inline_string else {}
+        return self.s.ok(cmd="analyze", entries=self.entries, reset=True, **extra)
+
+    def mark_data_regions(self):
+        """Strings and tables of string pointers / numbers that the analysis recognises are marked as data regions, so the model sees them as
+        text in the listing and no routine analysis can mistake them for code. Zero fill needs no annotation (the listing writes DS)."""
+        r = self.s.ok(cmd="data_regions", apply=True)
+        if r.get("applied"):
+            self.analyze()
+            kinds = Counter(x["kind"] for x in r["regions"] if x.get("applied"))
+            self.say(f'{r["applied"]} data regions marked: ' + ", ".join(f"{n} {k}" for k, n in sorted(kinds.items())))
+
+    def follow_pointer_tables(self):
+        """Tables of code addresses that the analysis only suggests (words that look like addresses of code behind a data reference) are
+        marked as pointer tables and followed, so that their handlers are analysed as routines. A false positive costs a few extra routines."""
+        s = self.s
+        for _ in range(3):  # following one table can reveal another
+            tables = [t for t in s.ok(cmd="jump_tables", max_entries=1)["tables"] if not t["followed"]]
+            marked = 0
+            for t in tables:
+                name = f'jump_table_{int(t["table"], 16):04x}'
+                if s.call(cmd="ann_data", addr=t["table"], length=t["bytes"], kind="pointers", name=name).get("ok"):
+                    marked += 1
+            if not marked:
+                break
+            r = self.analyze()
+            self.say(f'{marked} pointer table(s) followed: now {r["instructions"]} instructions')
+
     # ---- one routine ----
+    @staticmethod
+    def blocks(r):
+        """The routine's own code as [(start, end), ...] (hex strings, end exclusive). A shared exit far away makes the hull take in the
+        neighbours; the blocks do not. Without block data (an old server) the hull is the only block."""
+        found = [(b[0], b[1]) for b in (r.get("blocks") or [])]
+        if found:
+            return [(b0, b1 if to_int(b1) > to_int(b0) else "0x10000") for b0, b1 in found]  # a block that ends at &FFFF is written as end 0x0000
+        return [(r["addr"], f'0x{int(r["addr"], 16) + max(r.get("size", 1), 1):04X}')]
+
+    @staticmethod
+    def own_bytes(r):
+        return sum(to_int(e) - to_int(s) for s, e in Annotator.blocks(r))
+
+    @staticmethod
+    def hull(r):
+        """(first, last) of a routine as hex strings, last inclusive."""
+        blocks = Annotator.blocks(r)
+        return blocks[0][0], f'0x{max(to_int(blocks[-1][1]) - 1, to_int(blocks[0][0])):04X}'
+
     def routine_prompt(self, r, gaps=None):
         addr = r["addr"]
-        end = f'0x{int(addr, 16) + max(r["size"], 1) - 1:04X}'
-        listing = self.s.ok(cmd="listing", verify=False, addresses=True, max_chars=14000, **{"from": addr, "to": end})
+        blocks = self.blocks(r)
+        parts, refs, truncated, seen = [], [], False, set()
+        for i, (bs, be) in enumerate(blocks, 1):
+            last = f"0x{max(to_int(bs), to_int(be) - 1):04X}"
+            lst = self.s.ok(cmd="listing", verify=False, equates=False, addresses=True, max_chars=max(3000, 14000 // len(blocks)), **{"from": bs, "to": last})
+            truncated = truncated or bool(lst.get("truncated"))
+            head = (f"; ---- part {i} of {len(blocks)}: {bs}-{last} (other code lies in between; it is not part of this routine) ----\n"
+                    if len(blocks) > 1 else "")
+            parts.append(head + lst["text"])
+            for x in self.s.ok(cmd="references", **{"from": bs, "to": last})["references"]:
+                if x["addr"] not in seen:
+                    seen.add(x["addr"])
+                    refs.append(x)
         callees = []
         for c in r["calls"]:
-            if "name" in c:
-                callees.append(f'  {c["name"]} ({c["addr"]})')
-            elif "firmware" in c:
+            if "firmware" in c:
                 callees.append(f'  {c["firmware"]} (firmware)')
+            elif c.get("documented") or not c.get("name", "sub_").startswith("sub_"):
+                callees.append(f'  {c.get("name", "?")} ({c["addr"]})')
             else:
-                callees.append(f'  sub_{c["addr"][2:]} ({c["addr"]}, not documented yet)')
-        callers = ", ".join(r["callers"]) or "none (entry point)"
-        text = (f'ROUTINE_ADDR={addr}  current name: {r["name"]}  size: {r["size"]} bytes  ends with: {r["ends_with"]}\n'
+                callees.append(f'  {c.get("name") or "sub_" + c["addr"][2:]} ({c["addr"]}, not documented yet)')
+        callers = ", ".join(r["callers"]) or (f'reached through the jump table at {r["via_table"]} (no direct call)' if r.get("via_table")
+                                              else "none (entry point)")
+        size = f'{self.own_bytes(r)} bytes' + (f' in {len(blocks)} parts' if len(blocks) > 1 else "")
+        listing = "\n".join(parts)
+        text = (f'ROUTINE_ADDR={addr}  current name: {r["name"]}  size: {size}  ends with: {r["ends_with"]}\n'
                 f'Called from: {callers}\nCalls:\n' + ("\n".join(callees) if callees else "  nothing") +
-                f"\n\nListing:\n```\n{listing['text']}\n```\n{'[listing truncated; use get_listing for the rest]' if listing.get('truncated') else ''}\n"
+                f"\n\nListing:\n```\n{listing}\n```\n{'[listing truncated; use get_listing for the rest]' if truncated else ''}\n"
+                + self.references_text(refs) +
                 "Analyse this routine, test it, annotate it and call finish_routine.")
         if gaps:
             text += ("\n\nKnown gaps to close in this pass:\n- " + "\n- ".join(gaps) +
                      "\nVerify the existing documentation as well, and lower or raise its confidence accordingly.")
         return text
 
+    @staticmethod
+    def references_text(refs):
+        """What the operands of the listing point at (strings, tables, variables, other routines): the listing shows only names or addresses."""
+        if not refs:
+            return ""
+        lines = ["Referenced from this routine (the operands in the listing point at these):"]
+        for x in refs[:40]:
+            what = x["kind"] + (f", {x['length']} bytes" if x.get("length") else "")
+            body = ""
+            if x.get("preview"):
+                body = ": " + (f'"{x["preview"]}"' if x["kind"] in ("text", "text?") else x["preview"])
+            lines.append(f'  {x["addr"]} {x["name"]} ({what}){body}')
+        if len(refs) > 40:
+            lines.append(f"  ... and {len(refs) - 40} more")
+        return "\n".join(lines) + "\n\n"
+
     def process_routine(self, r, gaps=None):
         t = self.tools
         t.reset_routine()
         t.current = r["addr"]
-        t.range = (r["addr"], f'0x{int(r["addr"], 16) + max(r["size"], 1) - 1:04X}')
+        t.range = self.hull(r)
+        t.blocks = self.blocks(r)
         system = SYSTEM_PROMPT.format(lang=self.a.lang)
         if self.mode == "refine":
             system += REFINE_PROMPT
@@ -791,8 +1068,8 @@ class Annotator:
                 if t.finished:
                     return True
             self.say(f'  turn limit reached for {r["addr"]}')
-            still_open = {x["addr"].lower() for x in self.s.ok(cmd="routines", undocumented_only=True)["routines"]}
-            if r["addr"].lower() not in still_open:
+            still_open = {to_int(x["addr"]) for x in self.s.ok(cmd="routines", undocumented_only=True)["routines"]}
+            if to_int(r["addr"]) not in still_open:
                 self.say("  (the routine is documented, only finish_routine was missing: counted as partial; a refinement pass will check it)")
                 return "partial"
             return False
@@ -821,9 +1098,12 @@ class Annotator:
     # ---- gaps ----
     def routine_gaps(self, r):
         """Objective list of what is missing or doubtful about a routine's documentation."""
-        last = f'0x{int(r["addr"], 16) + max(r["size"], 1) - 1:04X}'
         gaps = [] if r["documented"] else ["the routine is not documented yet (document_routine)"]
-        gaps += self.tools.completeness_problems((r["addr"], last))
+        saved, self.tools.current = self.tools.current, r["addr"]
+        try:
+            gaps += self.tools.completeness_problems(self.blocks(r))
+        finally:
+            self.tools.current = saved
         conf = r.get("confidence", "")
         if conf == "low" or (conf == "medium" and self.a.refine_medium):
             gaps.append(f"the previous model marked its own documentation as confidence {conf}: verify it by running the routine")
@@ -831,8 +1111,8 @@ class Annotator:
 
     def only_filter(self, routines):
         if self.a.only:
-            wanted = {x.lower() for x in self.a.only}
-            routines = [r for r in routines if r["addr"].lower() in wanted]
+            wanted = {int(x, 0) if isinstance(x, str) else int(x) for x in self.a.only}
+            routines = [r for r in routines if to_int(r["addr"]) in wanted]
         return routines
 
     # ---- passes ----
@@ -845,7 +1125,7 @@ class Annotator:
                 break
             tried |= {r["addr"] for r in routines}
             for i, r in enumerate(routines, 1):
-                self.say(f'[{i}/{len(routines)}] {r["name"]} at {r["addr"]} ({r["size"]} bytes)')
+                self.say(f'[{i}/{len(routines)}] {r["name"]} at {r["addr"]} ({self.own_bytes(r)} bytes)')
                 done[self.process_routine_safely(r)] += 1
                 self.save()
         return done
@@ -879,12 +1159,58 @@ class Annotator:
         if self.a.report:
             lines = [f"# Annotation report", "", f"{len(rows) - len(open_rows)} of {len(rows)} routines complete, {len(open_rows)} with gaps.", ""]
             for r, g in open_rows:
-                lines.append(f'## {r["name"]} ({r["addr"]}, {r["size"]} bytes, confidence: {r.get("confidence") or "n/a"})')
+                lines.append(f'## {r["name"]} ({r["addr"]}, {self.own_bytes(r)} bytes, confidence: {r.get("confidence") or "n/a"})')
                 lines += [f"- {x}" for x in g]
                 lines.append("")
             with open(self.a.report, "w", encoding="utf-8") as f:
                 f.write("\n".join(lines))
         return len(open_rows)
+
+    def dry_run(self):
+        """What a real run would do, without contacting a model: routines in processing order with sizes and prompt estimates, jump tables,
+        data regions, firmware calls. Lets you check the load address, the entry points and the model's context window first."""
+        s, say = self.s, self.say
+        say("")
+        say("== dry run: no model is contacted ==")
+        reply = s.ok(cmd="routines")
+        routines = reply["routines"]
+        todo = s.ok(cmd="routines", undocumented_only=True)["routines"]
+        order = {r["addr"]: i for i, r in enumerate(todo, 1)}
+        base_tokens = int(len(SYSTEM_PROMPT) / 3.5)
+        rows, total, largest = [], 0, (0, "")
+        for r in routines:
+            chars = 0
+            for bs, be in self.blocks(r):
+                last = f"0x{max(to_int(bs), to_int(be) - 1):04X}"
+                chars += len(s.ok(cmd="listing", verify=False, equates=False, addresses=True, max_chars=14000, **{"from": bs, "to": last})["text"])
+            tokens = int(chars / 3.5) + base_tokens
+            if r["addr"] in order:
+                total += tokens
+                largest = max(largest, (tokens, r["name"]))
+            rows.append((order.get(r["addr"]), r, tokens, self.own_bytes(r)))
+        say(f'{len(routines)} routines, {len(todo)} still without documentation. Processing order (leaves first):')
+        for pos, r, tokens, size in sorted(rows, key=lambda x: (x[0] is None, x[0] or 0)):
+            fw = sum(1 for c in r["calls"] if "firmware" in c)
+            say(f'  {str(pos) + ".":>4} {r["name"]:<22} {r["addr"]}  {size:>5} B  {r.get("instructions", 0):>4} instr  calls {len(r["calls"]):>2}'
+                f'  called by {r.get("caller_count", len(r["callers"])):>2}' + (f'  firmware calls {fw}' if fw else "") +
+                (f'  via table {r["via_table"]}' if r.get("via_table") else "") + f'  ~{tokens} tokens' + ("  (documented)" if pos is None else ""))
+        for t in s.ok(cmd="jump_tables", max_entries=1)["tables"]:
+            say(f'jump table ({t["kind"]}) at {t["table"]}: {t["entry_count"]} entries' + ("" if t["followed"] else " - suggested, not followed"))
+        regions = s.ok(cmd="data_regions")["regions"]
+        if regions:
+            kinds = Counter(x["kind"] for x in regions)
+            say("data not yet annotated: " + ", ".join(f"{n} {k}" for k, n in sorted(kinds.items())))
+        ext = reply.get("external_calls", [])
+        if ext:
+            say("calls outside the analysed code: " + ", ".join(f'{e.get("firmware", e["addr"])} x{e["caller_count"]}' for e in ext[:20]))
+        say(f'estimate: about {total} prompt tokens IN TOTAL for the first messages of all {len(todo)} routines to be processed '
+            f'(the largest, {largest[1]}, about {largest[0]}); the conversation grows with each reply (typically 3-8 replies per routine, '
+            f'at most {self.a.max_turns}).')
+        ctx = self.a.num_ctx
+        if largest[0] > ctx * 0.4:
+            say(f'WARNING: the largest routine ({largest[1]}, ~{largest[0]} tokens) takes more than 40% of the context window ({ctx}); '
+                f'raise --num-ctx (and check that the model supports it) or accept that replies may be cut short.')
+        say("Run the same command without --dry-run to start the analysis.")
 
     def run(self):
         s = self.s
@@ -932,12 +1258,14 @@ def find_z80tool(explicit):
     return found
 
 
-def main(argv=None):
+def build_parser():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("--sna", help="Amstrad CPC snapshot (.sna) of the running program")
-    src.add_argument("--bin", help="raw binary (use with --org)")
-    p.add_argument("--org", default="0x4000", help="load address of --bin")
+    src.add_argument("--bin", help="raw binary (use with --org), or a file with an AMSDOS header (loaded where the header says)")
+    src.add_argument("--dsk", help="CPC disk image (.dsk); the file on it is given with --dsk-file")
+    p.add_argument("--dsk-file", help='the program on the --dsk image, e.g. "GAME.BIN"')
+    p.add_argument("--org", help="load address of --bin (default 0x4000, or the address in its AMSDOS header)")
     p.add_argument("--entry", action="append", help='entry point (repeatable), default: PC of the snapshot, e.g. "0x4000"')
     p.add_argument("--inline-string", action="append", help="routine that is followed by an inline string (bit-7 terminated), repeatable")
     p.add_argument("--rom", action="append", help="ROM image as FILE:lower|upper|both (without it the firmware calls are stubbed)")
@@ -945,6 +1273,10 @@ def main(argv=None):
     p.add_argument("--boot-instructions", type=int, default=30_000_000, help="instructions to run while booting")
     p.add_argument("--irq", type=int, default=0, metavar="CYCLES",
                    help="raise an interrupt every CYCLES T-states while routines run (CPC: 13312 = 300 Hz); 0 = never")
+    p.add_argument("--no-auto-tables", action="store_true", help="do not mark and follow tables of code addresses that the analysis only suggests")
+    p.add_argument("--no-auto-data", action="store_true", help="do not mark the strings, pointer tables and number tables the analysis recognises as data")
+    p.add_argument("--dry-run", action="store_true",
+                   help="load the program and run the analysis, print what a real run would do (routines, order, tables, data, token estimates); contact no model")
     p.add_argument("--project", help="annotation file (JSON); loaded if present, saved after every routine")
     p.add_argument("--out", help="write the final annotated listing here")
     p.add_argument("--only", action="append", help="process only this routine address (repeatable)")
@@ -968,13 +1300,24 @@ def main(argv=None):
     p.add_argument("--max-turns", type=int, default=20, help="model replies per routine (several tool calls fit in one reply)")
     p.add_argument("--log", help="write every model message and tool result to this JSON-lines file")
     p.add_argument("--z80tool", help="path to the z80tool executable")
-    a = p.parse_args(argv)
+    return p
+
+
+def main(argv=None):
+    a = build_parser().parse_args(argv)
+    if a.dsk and not a.dsk_file:
+        build_parser().error("--dsk needs --dsk-file (the program on the disk; `z80tool dsk ls IMAGE` lists them)")
     if not a.host.startswith("http"):
         a.host = "http://" + a.host
 
     server = Z80Server(find_z80tool(a.z80tool))
     log = open(a.log, "a", encoding="utf-8") if a.log else None
     try:
+        if a.dry_run:
+            worker = Annotator(server, [], a, log)
+            worker.setup()
+            worker.dry_run()
+            return 0
         passes = [make_pass(a, a.model, "explore", think=a.think == "true", max_tokens=a.max_tokens, max_turns=a.max_turns)]
         for model in a.refine_model:
             passes.append(make_pass(a, model, "refine", think=a.refine_think, max_tokens=a.refine_max_tokens, max_turns=a.refine_max_turns))

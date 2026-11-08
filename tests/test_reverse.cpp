@@ -206,8 +206,10 @@ int main() {
         CHECK(has(text, "greeting:"));
         CHECK(has(text, "screen at &C000: char row 24, byte column 10, scan line 0"));
         CHECK(has(text, "entry point"));
-        CHECK(!has(text, "sub_"));      // everything is named, except draw8's header (documented text mentions the name)
-        CHECK_EQ(listing.find("auto_labels")->asInt(), std::int64_t{1});  // loc for the d1 loop
+        // everything is named except the program entry, which is a routine of its own (header and sub_4000)
+        CHECK(has(text, "sub_4000:"));
+        CHECK(!has(text, "sub_4025") && !has(text, "sub_402F"));
+        CHECK_EQ(listing.find("auto_labels")->asInt(), std::int64_t{2});  // sub_4000 and loc for the d1 loop
 
         const Json capped = ask(s, R"({"cmd":"listing","max_chars":1000})");
         CHECK(capped.find("truncated")->asBool());

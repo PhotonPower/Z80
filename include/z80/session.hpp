@@ -7,6 +7,7 @@
 #include <string>
 #include <string_view>
 
+#include "z80/analysis.hpp"
 #include "z80/annotations.hpp"
 #include "z80/assembler.hpp"
 #include "z80/cpc.hpp"
@@ -64,6 +65,8 @@ private:
     };
     std::deque<IoWrite> ioLog_;
     std::deque<Byte> input_;
+    std::vector<std::pair<unsigned, unsigned>> unpackIgnore_;      ///< stages of an unpacker run_until_unpacked has seen already
+    std::optional<std::pair<unsigned, unsigned>> lastUnpackHit_;   ///< written range of the last stop
 
     // ---- reverse-engineering state (see session_analysis.cpp) ----
     struct FirmwareCall {
@@ -71,9 +74,14 @@ private:
         Word address = 0;
         Byte a = 0;
         Word bc = 0, de = 0, hl = 0;
+        std::optional<Word> callSite;  ///< the CALL instruction that led here (if the return address on the stack says so)
     };
     std::unique_ptr<Disassembler> dis_;   ///< code analysis (created by "analyze")
     std::set<Word> analysisEntries_;      ///< entry points given to "analyze"
+    std::vector<JumpTable> jumpTables_;   ///< found by the last "analyze"
+    std::vector<std::uint8_t> tableBytes_ = std::vector<std::uint8_t>(kAddressSpace, 0);  ///< bytes of followed address tables (data, never code)
+    /// The program: set by asm, load_file and analyze {from, to}; jump table targets and data guesses stay inside it.
+    std::optional<std::pair<Word, Word>> programRange_;
     Annotations ann_;                     ///< names and comments given by the user / LLM
     bool cpc_ = false;                    ///< Amstrad CPC mode: video hardware, firmware stubs
     cpc::VideoState video_;

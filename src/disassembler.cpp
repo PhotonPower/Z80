@@ -116,6 +116,11 @@ std::optional<Instruction> Disassembler::decodeAndMark(Word address, Word& nextA
     if (static_cast<std::uint32_t>(address) + ins.length - 1 > rangeLast_) {
         return std::nullopt;
     }
+    if (isData_) {
+        for (unsigned i = 0; i < ins.length; ++i) {
+            if (isData_(static_cast<Word>(address + i))) return std::nullopt;
+        }
+    }
     markRange(address, ins.length, true);
     nextAddress = ins.next();
 
@@ -154,7 +159,7 @@ std::optional<Instruction> Disassembler::decodeAndMark(Word address, Word& nextA
 }
 
 bool Disassembler::canAnalyse(Word address) const {
-    return address >= rangeFirst_ && address <= rangeLast_;
+    return address >= rangeFirst_ && address <= rangeLast_ && !(isData_ && isData_(address));
 }
 
 void Disassembler::analyzeRange(Word first, Word last) {

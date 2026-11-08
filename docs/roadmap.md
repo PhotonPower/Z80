@@ -39,15 +39,19 @@ Offen:
 
 ## Reverse Engineering mit LLM (Grundlage vorhanden)
 
-Siehe [reverse-engineering.md](reverse-engineering.md). Offen: Erprobung und Prompt-Feinschliff mit einem
-echten Qwen3-VL; 128K-Banking; Modus 3 und Blinken; Tastatur-/Joystick-Eingaben für Programme, die auf
-Eingaben warten; automatisches Erkennen von Sprungtabellen und Datentypen; Vergleich mehrerer Läufe
-(Selbstkonsistenz) und Rückfragen an den Menschen bei Unsicherheit.
+Siehe [reverse-engineering.md](reverse-engineering.md). Erledigt (Abgleich mit dem Schwesterprojekt
+[MC68000](https://github.com/PhotonPower/MC68000)): Sprungtabellen (Adresstabellen hinter `JP (HL)`/`PUSH`+`RET`, `JP`-Reihen,
+markierte Zeigertabellen), Datentypen (Strings, String-Zeigertabellen, Zahlentabellen, 16-Bit-Variablen), `references`, Konstanten,
+Tail-Calls und Routinenblöcke, `setup` für `run_routine`, Läufe durch leeren Speicher, Dry-Run, `z80_drive.py`, Beispielprogramm mit
+[Anleitung](walkthrough.md), CPC-Disk-Abbilder und AMSDOS-Kopf, Entpacken ([unpacking.md](unpacking.md)), Robustheitstest des Servers.
+
+Offen: Erprobung und Prompt-Feinschliff mit einem echten Qwen3-VL; 128K-Banking; Modus 3 und Blinken; Tastatur-/Joystick-Eingaben für
+Programme, die auf Eingaben warten; Erkennung weiterer Datentypen (Sprites, Strukturen über `IX`/`IY`); `RST`-Verteiler mit Daten dahinter;
+Vergleich mehrerer Läufe (Selbstkonsistenz) und Rückfragen an den Menschen bei Unsicherheit; Disk-Abbilder schreiben (`dsk put`).
 
 ## Danach (Ideen)
 
 - Undokumentierte Befehle (`SLL`, `IXH`/`IXL`, `IN F,(C)`) – optional per Schalter.
-- Bessere Analyse: Sprungtabellen, Datentyperkennung, Funktionsgrenzen.
 - Projektdatei (Kommentare, Symbole, Inline-Daten-Hooks, Bereiche) statt vieler Kommandozeilenoptionen.
 - Makros, `INCLUDE`, bedingte Assemblierung im Assembler.
 - Zielsystem-Profile (Amstrad CPC: Firmware-Symbole wie `&BB5A`, Bank-Umschaltung bei 128-KiB-Snapshots).

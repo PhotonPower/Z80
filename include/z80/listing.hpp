@@ -1,6 +1,8 @@
 #pragma once
 
+#include <map>
 #include <optional>
+#include <set>
 #include <string>
 
 #include "z80/annotations.hpp"
@@ -17,6 +19,13 @@ struct ListingOptions {
     bool hardwareComments = true;  ///< explain OUT (C),r to Gate Array / CRTC / PPI
     bool platformSymbols = true;   ///< show CPC firmware calls and hardware ports by name
     bool addresses = false;        ///< prefix every line with its address (for reading, not re-assembling; disables verification)
+    std::set<Word> entries;        ///< routine starts besides the call targets (program entries, cases of jump tables): sub_xxxx and a header
+    std::set<Word> targets;        ///< other addresses that need a label (jump tables)
+    std::map<Word, std::string> notes;  ///< automatic comments above a line (what a jump table is)
+    /// The whole program [first, last]: addresses in it get their automatic names (sub_/loc_/data_) even outside [from, to]; those names
+    /// are then defined by EQU lines. Default: only [from, to].
+    std::optional<std::pair<Word, Word>> program;
+    bool equates = true;           ///< false: no EQU prelude (an excerpt for reading; it does not assemble on its own then)
 };
 
 struct ListingResult {

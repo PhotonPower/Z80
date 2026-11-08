@@ -34,6 +34,27 @@ sollten weiter funktionieren.
 - Der Assembler (`asm --sna`) schreibt ausschließlich die assemblierten Bytes in diese Datei und
   lässt Kopfzeile (Register, Hardwarezustand) sowie alles andere unverändert.
 
+## CPC-Disk-Abbild (`.dsk`)
+
+- **Standard** („MV - CPCEMU Disk-File“): 256 Byte Kopf (Spuren bei &30, Seiten bei &31, Spurgröße bei &32), danach je Spur ein
+  „Track-Info“-Block von 256 Byte (Spur, Seite, Sektorgröße N, Zahl der Sektoren, je Sektor C/H/R/N/ST1/ST2) und die Sektordaten in der
+  gespeicherten Reihenfolge, jeder Sektor 128·2^N Byte.
+- **Extended** („EXTENDED CPC DSK File“): die Größe jeder Spur steht in einer Tabelle ab &34 (×256, 0 = unformatiert), die tatsächliche Länge
+  jedes Sektors im Sektoreintrag (Bytes 6–7); damit lassen sich auch kopiergeschützte Disketten abbilden. Abbilder, die hinter der letzten
+  benutzten Spur abgeschnitten sind, werden gelesen.
+- **AMSDOS-Dateisystem** (CP/M 2.2): das Format erkennt die kleinste Sektor-ID der Spur 0: **DATA** &C1 (keine reservierten Spuren),
+  **SYSTEM/VENDOR** &41 (zwei reservierte Spuren, Bootsektor Spur 0/&41), **IBM** &01 (eine reservierte Spur, 8 Sektoren je Spur). Blöcke von
+  1 KiB (zwei Sektoren zu 512 Byte), das Verzeichnis belegt die ersten beiden Blöcke (64 Einträge zu 32 Byte: Benutzer, Name 8+3 mit Attribut-Bits
+  „schreibgeschützt“ und „System“, Extent, Zahl der 128-Byte-Records, 16 Blocknummern). Eine Datei über 16 KiB hat mehrere Einträge
+  (Extents), gelöschte Einträge haben den Benutzer &E5.
+
+## AMSDOS-Kopf
+
+Dateien, die AMSDOS mit `SAVE` schreibt (Binärdateien, geschütztes BASIC), beginnen mit einem 128-Byte-Kopf: Benutzer (0), Name (1–11),
+Dateityp (18; 2 = binär), Ladeadresse (21–22), Länge (24–25), Einsprung (26–27), 24-Bit-Länge (64–66) und die **Prüfsumme** über die Bytes
+0–66 (67–68, 16 Bit). Erkannt wird der Kopf nur an der Prüfsumme (128 Nullbytes zählen nicht). `asm --amsdos` schreibt ihn, `dsk extract`
+entfernt ihn, `dis`, `monitor` und `load_file` legen die Datei an die Ladeadresse.
+
 ## Raw-Binary
 
 Die Datei wird 1:1 ab `--org` in den Speicher gelegt. Zum Disassemblieren gilt nur dieser Bereich

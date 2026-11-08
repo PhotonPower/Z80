@@ -80,11 +80,18 @@ bool isPseudo(const std::string& u) {
            u == "DEFW" || u == "DM" || u == "DEFM" || u == "DS" || u == "DEFS";
 }
 
+/// JP -> JR decisions of the optimiser, kept from pass to pass.
+struct ShortJumps {
+    std::set<int> shortLines;  ///< lines assembled as JR
+    std::set<int> blocked;     ///< lines whose JR went out of reach once: JP for good
+    bool changed = false;      ///< a decision changed in this pass
+};
+
 class Run {
 public:
     Run(const AssemblerOptions& options, const std::vector<std::string>& lines,
-        std::map<std::string, Symbol> symbols, bool finalPass)
-        : symbols_(std::move(symbols)), options_(options), lines_(lines), final_(finalPass) {}
+        std::map<std::string, Symbol> symbols, bool finalPass, ShortJumps* jumps = nullptr)
+        : symbols_(std::move(symbols)), options_(options), lines_(lines), final_(finalPass), jumps_(jumps) {}
 
     void execute() {
         pc_ = options_.origin;
@@ -247,13 +254,52 @@ private:
     }
 
     std::vector<Byte> instruction(const std::string& mnemonic, const std::string& operandText) {
-        const std::vector<std::string> operands = splitOperands(operandText);
+        std::vector<std::string> operands = splitOperands(operandText);
         const Word pc = pc_;
+        if (jumps_ && optimizableJump(mnemonic, operands)) {
+            const ExprResult target = eval(operands.back(), pc);
+            const std::int64_t distance = target.value - (static_cast<std::int64_t>(pc) + 2);
+            const bool known = target.ok && target.undefinedNames.empty();
+            const bool reach = known && distance >= -128 && distance <= 127;
+            if (jumps_->shortLines.count(lineNo_)) {
+                if (known && !reach) {  // the target moved out of reach: back to JP, for good
+                    jumps_->shortLines.erase(lineNo_);
+                    jumps_->blocked.insert(lineNo_);
+                    jumps_->changed = true;
+                } else {
+                    return encodeAs("JR", operands, pc);
+                }
+            } else if (reach && !jumps_->blocked.count(lineNo_)) {
+                jumps_->shortLines.insert(lineNo_);
+                jumps_->changed = true;
+                return encodeAs("JR", operands, pc);
+            }
+        }
         EncodeResult r = encodeInstruction(
             mnemonic, operands, pc,
             [this, pc](std::string_view expr) { return eval(expr, pc); });
         if (!r.error.empty()) error(r.error);
         return r.bytes;
+    }
+
+    std::vector<Byte> encodeAs(const char* mnemonic, const std::vector<std::string>& operands, Word pc) {
+        EncodeResult r = encodeInstruction(mnemonic, operands, pc, [this, pc](std::string_view expr) { return eval(expr, pc); });
+        if (!r.error.empty()) error(r.error);
+        return r.bytes;
+    }
+
+    /// JP nn, JP NZ/Z/NC/C,nn (JR has no other conditions; JP (HL) has no target).
+    static bool optimizableJump(const std::string& mnemonic, const std::vector<std::string>& operands) {
+        std::string m = mnemonic;
+        for (char& c : m) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        if (m != "JP" || operands.empty() || operands.size() > 2) return false;
+        if (!operands.back().empty() && operands.back().front() == '(') return false;
+        if (operands.size() == 2) {
+            std::string cc = operands[0];
+            for (char& c : cc) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+            return cc == "NZ" || cc == "Z" || cc == "NC" || cc == "C";
+        }
+        return true;
     }
 
     std::vector<Byte> pseudo(const std::string& mn, const std::string& operandText) {
@@ -316,6 +362,7 @@ private:
     int lineNo_ = 0;
     bool ended_ = false;
     std::set<std::string> definedThisPass_;
+    ShortJumps* jumps_;
 };
 
 std::map<std::string, std::int64_t> valuesOf(const std::map<std::string, Symbol>& symbols) {
@@ -425,17 +472,24 @@ AssemblyResult Assembler::assemble(std::string_view source) const {
         for (char& c : upperName) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
         symbols[upperName] = Symbol{value, 0, true};
     }
-    constexpr int kMaxPasses = 16;
-    for (int pass = 0; pass < kMaxPasses; ++pass) {
-        Run run(options_, lines, symbols, false);
+    ShortJumps jumps;
+    ShortJumps* optimizer = options_.optimize ? &jumps : nullptr;
+    const int maxPasses = options_.optimize ? 64 : 16;
+    for (int pass = 0; pass < maxPasses; ++pass) {
+        jumps.changed = false;
+        Run run(options_, lines, symbols, false, optimizer);
         run.execute();
-        const bool stable = valuesOf(run.symbols_) == valuesOf(symbols);
+        const bool stable = valuesOf(run.symbols_) == valuesOf(symbols) && !jumps.changed;
         symbols = std::move(run.symbols_);
         if (stable && pass > 0) break;
     }
 
-    Run finalRun(options_, lines, symbols, true);
+    jumps.changed = false;
+    Run finalRun(options_, lines, symbols, true, optimizer);
     finalRun.execute();
+    if (jumps.changed) {  // cannot happen with sane sources (decisions flip at most once), but must never go unnoticed
+        finalRun.diagnostics.push_back({Diagnostic::Severity::Error, 0, "the JP/JR optimisation did not settle; assemble without -O", ""});
+    }
 
     AssemblyResult result;
     result.diagnostics = std::move(finalRun.diagnostics);

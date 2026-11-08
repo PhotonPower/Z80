@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <iosfwd>
 #include <map>
 #include <optional>
@@ -65,6 +66,9 @@ public:
         rangeLast_ = last;
     }
 
+    /// Bytes for which `isData` returns true are never decoded as code (annotated data regions, jump tables).
+    void setDataBarrier(std::function<bool(Word)> isData) { isData_ = std::move(isData); }
+
     /// Reads "address,text" lines (see docs/formats.md). Returns warnings for bad lines.
     std::vector<std::string> loadComments(std::istream& in);
 
@@ -113,6 +117,7 @@ private:
     std::map<Word, std::vector<std::string>> comments_;
     std::set<Word> entryPoints_;
     std::map<Word, InlineDataKind> inlineData_;
+    std::function<bool(Word)> isData_;
     std::map<Word, std::set<Word>> callers_;   // call target -> addresses of CALL instructions
     std::map<Word, std::set<Word>> jumpers_;   // jump target -> addresses of JP/JR/DJNZ instructions
 };

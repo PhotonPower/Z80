@@ -133,6 +133,9 @@ def plans_for(sym):
     }
 
 
+CONTRACT = {"inputs": "see summary", "outputs": "none", "clobbers": "AF"}  # the routine contract the completeness check asks for
+
+
 class OrchestratorTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -489,26 +492,26 @@ class HardeningTest(unittest.TestCase):
             h = lambda n: f"0x{sym[n]:04x}"  # noqa: E731
             msg, sprite, counter = f"0x{sym['MSG']:04X}", f"0x{sym['SPRITE']:04X}", f"0x{sym['COUNTER']:04X}"
             fast = {   # pass 1: finishes START completely, leaves PRINT without comments, marks DRAW8 as a guess
-                h("PRINT"): [[("document_routine", {"addr": h("PRINT"), "name": "print_string", "summary": "Prints text.", "confidence": "high"})],
+                h("PRINT"): [[("document_routine", {"addr": h("PRINT"), "name": "print_string", "summary": "Prints text.", "confidence": "high", **CONTRACT})],
                              [("finish_routine", {})], [("finish_routine", {})]],
                 h("DRAW8"): [[("name_label", {"addr": h("D1"), "name": "row_loop"}),
                               ("add_comment", {"addr": h("D1"), "text": "one row per pass"}),
                               ("add_comment", {"addr": h("DRAW8"), "text": "eight rows"}),
-                              ("document_routine", {"addr": h("DRAW8"), "name": "draw_sprite_8x8", "summary": "Probably draws something.", "confidence": "low"})],
+                              ("document_routine", {"addr": h("DRAW8"), "name": "draw_sprite_8x8", "summary": "Probably draws something.", "confidence": "low", **CONTRACT})],
                              [("finish_routine", {})]],
                 h("START"): [[("name_variable", {"addr": counter, "name": "run_counter", "size": 1, "comment": "runs"}),
                               ("add_comment", {"addr": h("START"), "text": "entry"}), ("add_comment", {"addr": h("START") + "+3" if False else f"0x{sym['START'] + 2:04x}", "text": "set mode"}),
-                              ("document_routine", {"addr": h("START"), "name": "show_greeting_demo", "summary": "Demo.", "confidence": "high"})],
+                              ("document_routine", {"addr": h("START"), "name": "show_greeting_demo", "summary": "Demo.", "confidence": "high", **CONTRACT})],
                              [("finish_routine", {})]],
             }
             slow = {   # pass 2: only asked about PRINT (no comments) and DRAW8 (low confidence); has no vision
                 h("PRINT"): [[("add_comment", {"addr": h("PRINT"), "text": "read next character"}),
                               ("add_comment", {"addr": f"0x{sym['PRINT'] + 3:04x}", "text": "zero terminator ends the text"}),
-                              ("document_routine", {"addr": h("PRINT"), "name": "print_string", "summary": "Prints a zero terminated string.", "confidence": "high"})],
+                              ("document_routine", {"addr": h("PRINT"), "name": "print_string", "summary": "Prints a zero terminated string.", "confidence": "high", **CONTRACT})],
                              [("finish_routine", {})]],
                 h("DRAW8"): [[("run_routine", {"addr": h("DRAW8"), "registers": {"HL": sprite, "DE": "0xC78A"}, "screenshot": True})],
                              [("document_routine", {"addr": h("DRAW8"), "name": "draw_sprite_8x8", "summary": "Copies 8 bytes to 8 screen lines (refined).",
-                                                    "confidence": "high"})],
+                                                    "confidence": "high", **CONTRACT})],
                              [("finish_routine", {})]],
             }
             mock = MockOllama({}, plans_by_model={"fast": fast, "slow": slow},

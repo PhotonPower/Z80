@@ -6,6 +6,49 @@ die Versionierung an [Semantic Versioning](https://semver.org/lang/de/).
 
 ## [Unreleased]
 
+### Hinzugefügt (Abgleich mit dem Schwesterprojekt [MC68000](https://github.com/PhotonPower/MC68000))
+- **Sprungtabellen** (`z80/analysis.hpp`, Befehl `jump_tables`, Feld `jump_tables` in `analyze`): Adresstabellen hinter einem Verteiler
+  (`LD HL,tab` … `LD E,(HL)` / `INC HL` / `LD D,(HL)` / `EX DE,HL` / `JP (HL)`, auch `JP (IX)`/`JP (IY)` und `PUSH rr`/`RET`) und Reihen von `JP nn`,
+  in die ein berechnetes `JP (HL)` springt, werden erkannt und verfolgt, bis nichts Neues mehr auftaucht; als `pointers` markierte Bereiche ebenso;
+  Zeilen von Codeadressen hinter einem bloßen Datenverweis werden vorgeschlagen (`followed:false`). Die Fälle sind eigene Routinen (`via_table`),
+  das Listing zeigt die Tabelle mit Kommentar und `DW sub_…`. Auch `z80tool dis` folgt den Tabellen. Der Disassembler hat eine Datensperre
+  (`setDataBarrier`): annotierte Daten und Tabellen werden nie als Code dekodiert.
+- **Datentypen** (`data_regions`, `apply:true`): Strings (NUL oder Bit 7 am Ende), Tabellen von String-Zeigern, Zahlentabellen (wortweiser Zugriff,
+  auch in der direkt aufgerufenen Routine), 16-Bit-Variablen, Nullbereiche. Das Listing schreibt einen String je Zeile und bricht Datenzeilen nie
+  über einem Label um.
+- **`references`**: worauf die 16-Bit-Operanden eines Codeabschnitts zeigen (Name, Art, Inhalt, benutzende Befehle); der Auftrag an das Modell
+  enthält das als „Referenced from this routine“.
+- **Konstanten** (`ann_constant`, Werkzeug `mark_constant`, JSON `constants`): ein 16-Bit-Operand, der eine Zahl ist, bekommt kein `data_xxxx`.
+- **Routinen: Tail-Calls und Blöcke**: ein Sprung zum Anfang einer anderen Routine ist ein Aufruf, kein Teil der Routine; `routines` liefert `blocks`,
+  `start`, `end`, `bytes`, `instructions`, bei dokumentierten auch die Doku. Die Programm-Einsprungstelle ist eine Routine mit eigenem Kopf.
+- **Entpacken** ([docs/unpacking.md](docs/unpacking.md)): `track_writes`, `written`, `run_until_unpacked` (Stopp `unpacked`, `continue`, `ignore`,
+  `min_written`), `save_memory`; `Memory::trackWrites`, `Cpu::watchWrittenCode`.
+- **CPC-Disk-Abbilder** (`z80/dsk.hpp`, `z80tool dsk info|ls|extract|boot|sector`, Befehl `dsk_ls`, `load_file … name`): Standard- und
+  Extended-DSK, AMSDOS-Dateisystem (DATA, SYSTEM, IBM), mehrere Extents, Attribute, Bootsektor. **AMSDOS-Kopf** (`parseAmsdosHeader`,
+  `makeAmsdosHeader`): `asm --amsdos/--exec` schreibt ihn, `dis`, `monitor` und `load_file` laden an die Ladeadresse (PC = Einsprung).
+- **Assembler-Optimierung** `-O` (Protokoll `optimize`): `JP`/`JP NZ,Z,NC,C` → `JR` in Reichweite; Test mit 3000 Zufallsprogrammen.
+- Orchestrator: Werkzeuge **`remove_annotation`** und **`mark_constant`**; `run_routine` mit **`setup`** (Routinen vorher auf derselben Maschine),
+  Speicher als `text`, ehrlichem `returned`, Hinweis auf **leeren Speicher**, ASCII-Spalte, Namen der betroffenen Variablen, Hinweisen auf
+  Schreibzugriffe hinter das Programmende und in Code, Aufrufstelle der Firmware-Aufrufe; `mark_data kind=text` ohne Länge; erkannte Datenbereiche
+  und vorgeschlagene Zeigertabellen werden selbst eingetragen (`--no-auto-data`, `--no-auto-tables`); **`--dry-run`**; `--dsk IMAGE --dsk-file NAME`;
+  Auftragstext mit Blöcken („in 2 parts“), Referenzen und „reached through the jump table“; die Vollständigkeitsprüfung verlangt `inputs`/`outputs`/
+  `clobbers`/`confidence` und höchstens einen Kommentar je zwei Befehle; `build_parser()`.
+- **`agent/z80_drive.py`**: dieselben Werkzeuge von Hand bedient (ein Schritt je Aufruf, Zustand in einem Arbeitsverzeichnis, strenges `finish`,
+  Screenshots als Dateien).
+- Beispielprogramm `examples/cpc/demo_cpc.asm` mit Integrationstest über die ganze Kette, Anleitung [docs/walkthrough.md](docs/walkthrough.md).
+- Server: Protokoll 4; `analyze {from, to}` und der Programmbereich aus `asm`/`load_file`; Listing bis zum Programmende, Namen im ganzen Programm
+  (auch außerhalb eines Ausschnitts), `equates:false`; Läufe melden `fetched_from_empty_memory`; `firmware_log` mit `call_site`.
+- Tests `analysis`, `unpack`, `dsk`, `optimize`; der Robustheitstest schickt dem Server Tausende zufälliger Befehle.
+
+### Geändert
+- `max_instructions` höchstens 100 Millionen; `0` (ohne Befehlslimit) nur zusammen mit `max_cycles`.
+- `ann_remove` entfernt auch einen Datenbereich und eine Konstanten-Markierung; `name+versatz` ab 10 hexadezimal (`spieler+&26`).
+- `call` meldet bei der Rücksprungadresse mit falschem Stapelzeiger einen `note`.
+
+### Behoben
+- `ann_load` stürzte bei einer Projektdatei ab, deren Eintrag kein `address`/`length` hatte (gefunden vom neuen Robustheitstest);
+  `Json::asInt` für Zahlen außerhalb des 64-Bit-Bereichs.
+
 ### Behoben
 - Orchestrator: Ein ungültiger Tool-Aufruf des Modells (Ollama `HTTP 500 invalid character 'x' …`, z. B. nackte `0x0C5A`) beendete
   den ganzen Lauf. Jetzt: Hinweis ans Modell und neue Anfrage; ein Serverfehler bei einer Routine überspringt nur diese;

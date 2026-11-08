@@ -27,7 +27,16 @@ bool Session::firmwareStub(Cpu& cpu) {
     Registers& r = cpu.regs();
     const auto name = cpc::firmwareName(r.pc);
     if (!name) return false;
-    firmwareLog_.push_back({*name, r.pc, r.a(), r.bc(), r.de(), r.hl()});
+    std::optional<Word> callSite;
+    {
+        // the return address on the stack points behind the CALL: its operand must be this entry
+        const Word ret = static_cast<Word>(memory_.read(r.sp) | (memory_.read(static_cast<Word>(r.sp + 1)) << 8));
+        const Word site = static_cast<Word>(ret - 3);
+        const Byte op = memory_.read(site);
+        const bool isCall = op == 0xCD || (op & 0xC7) == 0xC4;
+        if (isCall && memory_.read16(static_cast<Word>(site + 1)) == r.pc) callSite = site;
+    }
+    firmwareLog_.push_back({*name, r.pc, r.a(), r.bc(), r.de(), r.hl(), callSite});
     while (firmwareLog_.size() > 4096) firmwareLog_.pop_front();
 
     auto clearScreen = [this] {
@@ -99,6 +108,7 @@ Json Session::Impl::cmdLoadSna() {
     const auto header = cpc::parseSnaHeader(data);
     if (!header) throw SessionError("not a CPC snapshot (.sna)");
     s.memory_.load(0, loadSna(data).bytes());
+    s.programRange_.reset();
     if (flag("state", true)) {
         s.cpu_.setState(header->cpu);
         s.video_ = header->video;
@@ -134,11 +144,47 @@ Json Session::Impl::cmdLoadRom() {
     return j;
 }
 
+AnalysisContext Session::Impl::analysisContext() const {
+    AnalysisContext ctx;
+    if (s.programRange_) {
+        ctx.first = s.programRange_->first;
+        ctx.last = s.programRange_->second;
+    } else if (s.dis_ && s.dis_->hasResult()) {
+        ctx.first = s.dis_->lowestAddress();
+        ctx.last = s.dis_->highestAddress();
+        // annotated data right behind the code belongs to the program
+        for (const auto& [a, region] : s.ann_.dataRegions()) {
+            if (a > ctx.last && a <= ctx.last + 0x40u) ctx.last = std::min<unsigned>(0xFFFF, static_cast<unsigned>(a) + region.length - 1);
+        }
+    }
+    const Annotations* ann = &s.ann_;
+    ctx.isData = [ann](Word a) { return ann->dataCovering(a) != nullptr; };
+    ctx.claimed = [ann](Word a) { return ann->dataCovering(a) != nullptr || ann->expressionFor(a).has_value(); };
+    for (const auto& [a, region] : s.ann_.dataRegions()) {
+        if (region.kind == DataKind::Pointers) ctx.pointerRegions.emplace_back(a, region.length);
+    }
+    return ctx;
+}
+
 Json Session::Impl::cmdAnalyze() {
     RamView ram(s);
+    if (const Json* from = req.find("from")) {
+        const Json* to = req.find("to");
+        if (!to) throw SessionError("'from' needs 'to' (the last byte of the program)");
+        const Word f = address(*from, "from"), t = address(*to, "to");
+        if (t < f) throw SessionError("'to' must not be below 'from'");
+        s.programRange_ = std::make_pair(f, t);
+    }
     if (flag("reset", false) || !s.dis_) {
         s.dis_ = std::make_unique<Disassembler>(s.memory_);
         s.analysisEntries_.clear();
+        s.jumpTables_.clear();
+        std::fill(s.tableBytes_.begin(), s.tableBytes_.end(), 0);
+    }
+    {
+        const Annotations* ann = &s.ann_;
+        const std::vector<std::uint8_t>* tables = &s.tableBytes_;
+        s.dis_->setDataBarrier([ann, tables](Word a) { return (*tables)[a] != 0 || ann->dataCovering(a) != nullptr; });
     }
     if (const Json* inl = req.find("inline_strings"); inl && inl->isArray()) {
         const std::string kind = req.find("inline_kind") && req.find("inline_kind")->isString() ? req.find("inline_kind")->asString() : "bit7";
@@ -154,39 +200,50 @@ Json Session::Impl::cmdAnalyze() {
         if (!from || !to) throw SessionError("'linear' needs from and to");
         s.dis_->analyzeRange(address(*from, "from"), address(*to, "to"));
     } else {
-        if (entries.empty()) entries.push_back(s.cpu_.regs().pc);
-        for (std::size_t i = 1; i < entries.size(); ++i) s.dis_->addEntryPoint(entries[i]);
-        s.dis_->analyzeFlow(entries[0]);
+        if (entries.empty() && s.analysisEntries_.empty()) entries.push_back(s.cpu_.regs().pc);
         for (Word e : entries) s.analysisEntries_.insert(e);
+        for (Word e : s.analysisEntries_) s.dis_->addEntryPoint(e);
+        s.dis_->analyzeFlow(entries.empty() ? *s.analysisEntries_.begin() : entries[0]);
+    }
+    // jump tables: follow their targets until nothing new turns up
+    const bool followTables = flag("tables", true);
+    for (int round = 0; round < 16; ++round) {
+        s.jumpTables_ = findJumpTables(s.memory_, *s.dis_, analysisContext());
+        bool grown = false;
+        for (const JumpTable& t : s.jumpTables_) {
+            if (!t.followed || !followTables) continue;
+            if (t.kind == JumpTable::Kind::Pointers) {
+                for (unsigned i = 0; i < t.bytes && t.table + i < kAddressSpace; ++i) s.tableBytes_[t.table + i] = 1;
+            }
+            std::vector<Word> starts = t.targets;
+            if (t.kind == JumpTable::Kind::JumpRow) starts.insert(starts.end(), t.slots.begin(), t.slots.end());
+            for (Word target : starts) {
+                if (s.dis_->isInstructionStart(target)) continue;
+                s.dis_->addEntryPoint(target);
+                s.dis_->analyzeFlow(target);
+                grown = true;
+            }
+        }
+        if (!grown) break;
     }
     Json j = Json::object();
     j.set("instructions", s.dis_->instructionCount()).set("call_targets", s.dis_->callers().size());
+    j.set("jump_tables", s.jumpTables_.size());
     if (s.dis_->hasResult()) j.set("from", hex16(s.dis_->lowestAddress())).set("to", hex16(s.dis_->highestAddress()));
+    if (s.programRange_) {
+        Json pr = Json::object();
+        pr.set("from", hex16(s.programRange_->first)).set("to", hex16(s.programRange_->second));
+        j.set("program", pr);
+    }
     return j;
 }
 
-Json Session::Impl::cmdRoutines() {
-    if (!s.dis_ || !s.dis_->hasResult()) throw SessionError("nothing analysed yet (run \"analyze\" first)");
-    RamView ram(s);
-    const Disassembler& dis = *s.dis_;
-
-    struct Info {
-        Word address;
-        std::size_t size = 0;
-        std::set<Word> callees;
-        std::string end = "unknown";
-    };
+std::set<Word> Session::Impl::routineEntries() const {
     std::set<Word> entries;
-    Json external = Json::array();
+    const Disassembler& dis = *s.dis_;
     for (const auto& [a, refs] : dis.callers()) {
-        if (dis.isInstructionStart(a)) {
-            entries.insert(a);
-        } else {  // call into the firmware or into code that was not analysed
-            Json e = Json::object();
-            e.set("addr", hex16(a)).set("caller_count", refs.size());
-            if (auto fw = cpc::firmwareName(a)) e.set("firmware", *fw);
-            external.push(std::move(e));
-        }
+        (void)refs;
+        if (dis.isInstructionStart(a)) entries.insert(a);
     }
     for (const auto& [a, doc] : s.ann_.routines()) {
         (void)doc;
@@ -195,86 +252,82 @@ Json Session::Impl::cmdRoutines() {
     for (Word a : s.analysisEntries_) {
         if (dis.isInstructionStart(a)) entries.insert(a);  // the program entry is a routine of its own
     }
-
-    std::map<Word, Info> infos;
-    for (Word entry : entries) {
-        // A routine is everything its jumps can reach (CALLs lead to other routines, backward jumps below the entry
-        // belong to someone else): a main loop with scattered branches is one routine, not just its first stretch.
-        Info info;
-        info.address = entry;
-        std::set<Word> seen;
-        std::vector<Word> work{entry};
-        unsigned maxEnd = entry;
-        bool sawReturn = false, sawIndirect = false;
-        while (!work.empty() && seen.size() < 4096) {
-            Word a = work.back();
-            work.pop_back();
-            while (a >= entry && dis.isInstructionStart(a) && seen.insert(a).second && seen.size() < 4096) {
-                const Instruction ins = decode(s.memory_, a, {});
-                maxEnd = std::max<unsigned>(maxEnd, static_cast<unsigned>(a) + ins.length);
-                if ((ins.flow == FlowKind::Call || ins.flow == FlowKind::ConditionalCall) && ins.target) info.callees.insert(*ins.target);
-                if ((ins.flow == FlowKind::Jump || ins.flow == FlowKind::ConditionalJump) && ins.target && *ins.target >= entry) work.push_back(*ins.target);
-                if (ins.flow == FlowKind::Return) { sawReturn = true; break; }
-                if (ins.flow == FlowKind::Jump) break;
-                if (ins.flow == FlowKind::JumpIndirect) { sawIndirect = true; break; }
-                a = ins.next();
-            }
+    for (const JumpTable& t : s.jumpTables_) {  // a case of a jump table is code that nobody calls directly: a routine of its own
+        if (!t.followed) continue;
+        for (Word target : t.targets) {
+            if (dis.isInstructionStart(target)) entries.insert(target);
         }
-        info.size = std::min<unsigned>(maxEnd, 0x10000u) - entry;
-        info.end = sawReturn ? "ret" : (sawIndirect ? "jump_indirect" : "jump");
-        infos[entry] = std::move(info);
     }
+    return entries;
+}
 
-    // depth in the call graph: leaves (no known callees) come first
-    std::map<Word, int> depth;
-    std::function<int(Word, int)> visit = [&](Word a, int budget) -> int {
-        if (auto it = depth.find(a); it != depth.end()) return it->second;
-        if (budget == 0 || infos.count(a) == 0) return 0;
-        depth[a] = 0;  // cycle guard
-        int d = 0;
-        for (Word c : infos[a].callees) {
-            if (infos.count(c)) d = std::max(d, 1 + visit(c, budget - 1));
-        }
-        return depth[a] = d;
-    };
-    for (const auto& [a, info] : infos) { (void)info; visit(a, 64); }
+Json Session::Impl::cmdRoutines() {
+    if (!s.dis_ || !s.dis_->hasResult()) throw SessionError("nothing analysed yet (run \"analyze\" first)");
+    RamView ram(s);
+    const Disassembler& dis = *s.dis_;
 
-    std::vector<Word> order;
-    for (const auto& [a, info] : infos) { (void)info; order.push_back(a); }
+    Json external = Json::array();
+    for (const auto& [a, refs] : dis.callers()) {
+        if (dis.isInstructionStart(a)) continue;
+        // call into the firmware or into code that was not analysed
+        Json e = Json::object();
+        e.set("addr", hex16(a)).set("caller_count", refs.size());
+        if (auto fw = cpc::firmwareName(a)) e.set("firmware", *fw);
+        external.push(std::move(e));
+    }
+    std::vector<RoutineInfo> infos = computeRoutines(s.memory_, dis, routineEntries(), s.jumpTables_);
+
     const std::string how = req.find("order") && req.find("order")->isString() ? req.find("order")->asString() : "bottom_up";
+    if (how != "bottom_up" && how != "address") throw SessionError("order must be bottom_up or address");
     if (how == "bottom_up") {
-        std::stable_sort(order.begin(), order.end(), [&](Word x, Word y) { return depth[x] < depth[y]; });
+        std::stable_sort(infos.begin(), infos.end(), [](const RoutineInfo& x, const RoutineInfo& y) { return x.depth < y.depth; });
     }
     const bool onlyOpen = flag("undocumented_only", false);
 
     Json list = Json::array();
-    for (Word a : order) {
-        const Info& info = infos[a];
-        const bool documented = s.ann_.routineAt(a) != nullptr;
+    for (const RoutineInfo& info : infos) {
+        const Word a = info.entry;
+        const RoutineDoc* doc = s.ann_.routineAt(a);
+        const bool documented = doc != nullptr;
         if (onlyOpen && documented) continue;
         Json e = Json::object();
         e.set("addr", hex16(a));
         if (auto n = s.ann_.nameAt(a)) e.set("name", *n);
         else e.set("name", "sub_" + hexDigits(a, 4));
-        e.set("documented", documented).set("size", info.size).set("ends_with", info.end).set("depth", depth[a]);
-        if (documented) e.set("confidence", s.ann_.routineAt(a)->confidence);
-        Json callers = Json::array();
-        if (auto it = dis.callers().find(a); it != dis.callers().end()) {
-            int n = 0;
-            for (Word c : it->second) {
-                if (n++ == 8) break;
-                callers.push(hex16(c));
-            }
-            e.set("caller_count", it->second.size());
-        } else {
-            e.set("caller_count", 0);
+        e.set("documented", documented).set("size", info.end - info.start).set("ends_with", info.endsWith).set("depth", info.depth);
+        e.set("start", hex16(info.start)).set("end", hex16(info.end & 0xFFFF)).set("instructions", info.instructions).set("bytes", info.bytes);
+        Json blocks = Json::array();
+        for (const auto& [bs, be] : info.blocks) {
+            Json b = Json::array();
+            b.push(hex16(bs));
+            b.push(hex16(be & 0xFFFF));
+            blocks.push(std::move(b));
         }
-        e.set("callers", callers);
+        e.set("blocks", blocks);
+        if (documented) {
+            e.set("confidence", doc->confidence).set("summary", doc->summary).set("inputs", doc->inputs).set("outputs", doc->outputs).set("clobbers", doc->clobbers);
+        }
+        if (info.viaTable && info.callers.empty()) e.set("via_table", hex16(*info.viaTable));
+        Json callers = Json::array();
+        int n = 0;
+        for (Word c : info.callers) {
+            if (n++ == 8) break;
+            callers.push(hex16(c));
+        }
+        e.set("caller_count", info.callers.size()).set("callers", callers);
         Json callees = Json::array();
         for (Word c : info.callees) {
             Json ce = Json::object();
             ce.set("addr", hex16(c));
-            if (auto n = s.ann_.nameAt(c)) ce.set("name", *n);
+            if (auto nm = s.ann_.nameAt(c)) ce.set("name", *nm);
+            else ce.set("name", "sub_" + hexDigits(c, 4));
+            ce.set("documented", s.ann_.routineAt(c) != nullptr);
+            callees.push(std::move(ce));
+        }
+        for (Word c : info.external) {
+            Json ce = Json::object();
+            ce.set("addr", hex16(c));
+            if (auto nm = s.ann_.nameAt(c)) ce.set("name", *nm);
             else if (auto fw = cpc::firmwareName(c)) ce.set("firmware", *fw);
             callees.push(std::move(ce));
         }
@@ -286,6 +339,161 @@ Json Session::Impl::cmdRoutines() {
     return j;
 }
 
+Json Session::Impl::cmdJumpTables() {
+    if (!s.dis_ || !s.dis_->hasResult()) throw SessionError("nothing analysed yet (run \"analyze\" first)");
+    const auto maxEntries = static_cast<std::size_t>(integer("max_entries", 64, 1, 4096));
+    Json arr = Json::array();
+    for (const JumpTable& t : s.jumpTables_) {
+        Json e = Json::object();
+        e.set("kind", t.kind == JumpTable::Kind::JumpRow ? "jump_row" : "pointers");
+        if (t.jump) e.set("jump", hex16(*t.jump));
+        e.set("table", hex16(t.table)).set("bytes", t.bytes).set("followed", t.followed).set("how", t.how);
+        e.set("entry_count", t.slots.size());
+        Json entries = Json::array();
+        for (std::size_t i = 0; i < t.slots.size() && i < maxEntries; ++i) {
+            Json x = Json::object();
+            x.set("slot", hex16(t.slots[i])).set("target", hex16(t.targets[i]));
+            if (auto n = s.ann_.nameAt(t.targets[i])) x.set("name", *n);
+            entries.push(std::move(x));
+        }
+        e.set("entries", entries);
+        if (!t.followed) e.set("hint", "looks like a table of code addresses; mark it with ann_data kind=pointers and analyze again to follow it");
+        arr.push(std::move(e));
+    }
+    Json j = Json::object();
+    j.set("tables", arr);
+    return j;
+}
+
+Json Session::Impl::cmdDataRegions() {
+    if (!s.dis_ || !s.dis_->hasResult()) throw SessionError("nothing analysed yet (run \"analyze\" first)");
+    RamView ram(s);
+    const bool apply = flag("apply", false);
+    const std::vector<DataGuess> guesses = guessData(s.memory_, *s.dis_, s.jumpTables_, analysisContext());
+    Json arr = Json::array();
+    unsigned applied = 0;
+    for (const DataGuess& g : guesses) {
+        Json e = Json::object();
+        const char* kind = g.kind == DataGuess::Kind::Text ? "text" : g.kind == DataGuess::Kind::Pointers ? "pointers"
+                           : g.kind == DataGuess::Kind::Words ? "words" : "zeros";
+        e.set("addr", hex16(g.start)).set("length", g.length).set("kind", kind).set("reason", g.reason);
+        if (!g.preview.empty()) e.set("preview", g.preview);
+        if (apply && g.kind != DataGuess::Kind::Zeros) {  // zero runs need no annotation: the listing writes them as DS
+            DataRegion region;
+            region.address = g.start;
+            region.length = g.length;
+            region.kind = g.kind == DataGuess::Kind::Text ? DataKind::Text : g.kind == DataGuess::Kind::Words ? DataKind::Words : DataKind::Pointers;
+            const bool done = !s.ann_.setData(region).has_value();
+            e.set("applied", done);
+            if (done) ++applied;
+        }
+        arr.push(std::move(e));
+    }
+    Json j = Json::object();
+    j.set("regions", arr);
+    if (apply) j.set("applied", applied);
+    return j;
+}
+
+Json Session::Impl::cmdReferences() {
+    // what a stretch of code refers to: the targets of its 16-bit data operands, with name, type and a look at the contents
+    if (!s.dis_ || !s.dis_->hasResult()) throw SessionError("nothing analysed yet (run \"analyze\" first)");
+    RamView ram(s);
+    const Disassembler& dis = *s.dis_;
+    const Annotations& ann = s.ann_;
+    const unsigned from = addr("from");
+    const unsigned to = req.find("to") ? static_cast<unsigned>(addr("to")) + 1 : 0x10000u;  // 'to' is the last byte (inclusive)
+    std::map<Word, std::vector<Word>> targets;
+    const AnalysisContext ctx = analysisContext();
+    for (unsigned a = from; a < to && a < kAddressSpace; ++a) {
+        if (!dis.isInstructionStart(static_cast<Word>(a)) || ann.isConstant(static_cast<Word>(a))) continue;
+        const auto d = dataOperandAt(s.memory_, static_cast<Word>(a));
+        if (!d) continue;
+        if (!d->memory && d->value < 0x0100) continue;  // small numbers are rarely addresses
+        // an immediate outside the program is a number (LD BC,&0506) unless it names the screen or the firmware
+        if (!d->memory && (d->value < ctx.first || d->value > ctx.last) && !(s.cpc_ && (d->value >= 0xC000 || cpc::firmwareName(d->value)))) continue;
+        if (dis.isInstructionStart(d->value) && d->value >= from && d->value < to) continue;  // a label inside the stretch: the listing shows it
+        targets[d->value].push_back(static_cast<Word>(a));
+    }
+    auto printable = [](Byte b) { return b >= 0x20 && b < 0x7F; };
+    auto rd = [this](unsigned a) { return s.memory_.read(static_cast<Word>(a)); };
+    Json arr = Json::array();
+    for (const auto& [t, users] : targets) {
+        std::string kind = "unknown", name, preview;
+        unsigned length = 0;
+        const DataRegion* region = ann.dataCovering(t);
+        if (dis.isInstructionStart(t)) {
+            kind = "code";
+            name = ann.nameAt(t) ? *ann.nameAt(t) : "sub_" + hexDigits(t, 4);
+        } else if (auto fw = cpc::firmwareName(t); fw && s.cpc_) {
+            kind = "firmware";
+            name = *fw;
+        } else if (s.cpc_ && t >= 0xC000 && !region) {
+            kind = "screen";
+            name = "screen";
+            preview = cpc::describeScreenAddress(t);
+        } else if (region) {
+            kind = toString(region->kind);
+            length = region->length;
+            name = ann.nameAt(region->address) ? *ann.nameAt(region->address) : "data_" + hexDigits(region->address, 4);
+            if (t != region->address) name += "+" + std::to_string(t - region->address);
+            const unsigned end = static_cast<unsigned>(region->address) + region->length;
+            if (region->kind == DataKind::Text) {
+                for (unsigned p = t; p < end && preview.size() < 60; ++p) {
+                    const Byte b = rd(p);
+                    if (b == 0) break;
+                    const Byte c = b & 0x7F;
+                    preview += c == 13 ? std::string("\\r") : c == 10 ? std::string("\\n") : printable(c) ? std::string(1, static_cast<char>(c)) : "\\x" + hexDigits(b, 2);
+                    if (b >= 0x80) break;  // the last character has bit 7 set
+                }
+            } else if (region->kind == DataKind::Words || region->kind == DataKind::Pointers) {
+                unsigned p = t;
+                for (; p + 2 <= end && preview.size() < 70; p += 2) {
+                    const Word v = s.memory_.read16(static_cast<Word>(p));
+                    std::string item = hexDigits(v, 4);
+                    if (region->kind == DataKind::Pointers) {
+                        if (auto n = ann.expressionFor(v)) item = *n;
+                    }
+                    preview += (preview.empty() ? "" : " ") + item;
+                }
+                if (p + 2 <= end) preview += " ...";
+            } else {
+                for (unsigned p = t; p < end && p < t + 16u; ++p) preview += (preview.empty() ? "" : " ") + hexDigits(rd(p), 2);
+            }
+        } else {
+            if (auto n = ann.expressionFor(t)) {
+                kind = "variable";
+                name = *n;
+            } else {
+                name = "data_" + hexDigits(t, 4);
+            }
+            // bytes that no region covers but read like a short string: shown as such, marked with a question mark
+            unsigned n = 0;
+            while (n < 40 && t + n < kAddressSpace && printable(rd(t + n))) ++n;
+            if (n >= 2 && t + n < kAddressSpace && (rd(t + n) == 0 || (rd(t + n) >= 0xA0 && printable(rd(t + n) & 0x7F))) && !dis.isCovered(t)) {
+                kind = "text?";
+                length = n + 1;
+                for (unsigned i = 0; i <= n; ++i) {
+                    if (rd(t + i) != 0) preview += static_cast<char>(rd(t + i) & 0x7F);
+                }
+            }
+            if (preview.empty()) {
+                for (unsigned p = t; p < t + 8u && p < kAddressSpace; ++p) preview += (preview.empty() ? "" : " ") + hexDigits(rd(p), 2);
+            }
+        }
+        Json e = Json::object();
+        e.set("addr", hex16(t)).set("name", name).set("kind", kind).set("length", length);
+        if (!preview.empty()) e.set("preview", preview);
+        Json usedAt = Json::array();
+        for (std::size_t i = 0; i < users.size() && i < 4; ++i) usedAt.push(hex16(users[i]));
+        e.set("used_at", usedAt);
+        arr.push(std::move(e));
+    }
+    Json j = Json::object();
+    j.set("references", arr);
+    return j;
+}
+
 Json Session::Impl::cmdListing() {
     if (!s.dis_) throw SessionError("nothing analysed yet (run \"analyze\" first)");
     ListingOptions options;
@@ -294,8 +502,37 @@ Json Session::Impl::cmdListing() {
     options.verify = flag("verify", true);
     options.showXrefs = flag("xrefs", true);
     options.addresses = flag("addresses", false);
+    options.equates = flag("equates", true);
+    {
+        const AnalysisContext ctx = analysisContext();
+        options.program = std::make_pair(static_cast<Word>(ctx.first), static_cast<Word>(ctx.last));
+        // the whole listing reaches to the end of the program: data behind the last instruction belongs to it
+        if (!options.to && s.programRange_ && s.dis_->hasResult() && s.programRange_->second > s.dis_->highestAddress() &&
+            (!options.from || *options.from <= s.programRange_->second)) {
+            options.to = s.programRange_->second;
+        }
+    }
     RamView ram(s);
-    const ListingResult r = renderListing(s.memory_, *s.dis_, s.ann_, options);
+    // followed address tables are data: shown as DW rows with the names of their targets
+    Annotations shown = s.ann_;
+    for (const JumpTable& t : s.jumpTables_) {
+        if (!t.followed || t.kind != JumpTable::Kind::Pointers || t.bytes < 2) continue;
+        bool free = true;
+        for (unsigned i = 0; i < t.bytes && free; ++i) free = shown.dataCovering(static_cast<Word>(t.table + i)) == nullptr;
+        if (!free) continue;
+        DataRegion region;
+        region.address = t.table;
+        region.length = t.bytes & ~1u;
+        region.kind = DataKind::Pointers;
+        (void)shown.setData(region);
+    }
+    options.entries = routineEntries();
+    for (const JumpTable& t : s.jumpTables_) {
+        if (!t.followed) continue;
+        if (t.kind == JumpTable::Kind::JumpRow) options.targets.insert(t.table);  // an address table gets a data_ label from its user
+        options.notes[t.table] = "jump table (" + std::to_string(t.slots.size()) + " entries): " + t.how;
+    }
+    const ListingResult r = renderListing(s.memory_, *s.dis_, shown, options);
     const auto maxChars = static_cast<std::size_t>(integer("max_chars", 60000, 1000, 10'000'000));
     Json j = Json::object();
     if (r.text.size() > maxChars) {
@@ -368,9 +605,23 @@ Json Session::Impl::cmdAnnotate(const std::string& cmd) {
         const std::string t = text("text");
         if (flag("block", false)) s.ann_.setBlockComment(a, t);
         else s.ann_.setComment(a, t);
+    } else if (cmd == "ann_constant") {
+        const Word a = addr("addr");
+        if (s.dis_ && !s.dis_->isInstructionStart(a)) {
+            throw SessionError("address &" + hexDigits(a, 4) + " is not the first byte of an analysed instruction; a constant is marked on the instruction that holds the 16-bit value");
+        }
+        {
+            RamView ram(s);
+            if (!dataOperandAt(s.memory_, a)) {
+                throw SessionError("the instruction at &" + hexDigits(a, 4) + " has no 16-bit operand that could be an address (only LD rr,nn and LD (nn) forms)");
+            }
+        }
+        s.ann_.setConstant(a, !flag("remove", false));
     } else if (cmd == "ann_remove") {
         const Word a = addr("addr");
-        const bool removed = s.ann_.removeLabel(a) | s.ann_.removeComment(a);
+        const bool removedName = s.ann_.removeLabel(a);
+        const bool removedComment = s.ann_.removeComment(a);
+        const bool removed = removedName || removedComment;
         j.set("removed", removed);
     } else if (cmd == "ann_title") {
         s.ann_.setTitle(text("text"));
@@ -462,8 +713,9 @@ Json Session::Impl::cmdScreen(const std::string& cmd) {
 bool Session::Impl::analysisCommand(const std::string& cmd, Json& result) {
     if (cmd == "info") {
         // protocol 3: analysis, annotations, listing with idiom comments and "user_comments", screen, CPC machine
+        // protocol 4: jump_tables, data_regions, references, ann_constant, routine blocks, unpacking, firmware call sites
         result = Json::object();
-        result.set("name", "z80tool").set("protocol", 3);
+        result.set("name", "z80tool").set("protocol", 4);
         return true;
     }
     if (cmd == "machine") result = cmdMachine();
@@ -472,9 +724,12 @@ bool Session::Impl::analysisCommand(const std::string& cmd, Json& result) {
     else if (cmd == "load_rom") result = cmdLoadRom();
     else if (cmd == "analyze") result = cmdAnalyze();
     else if (cmd == "routines") result = cmdRoutines();
+    else if (cmd == "jump_tables") result = cmdJumpTables();
+    else if (cmd == "data_regions") result = cmdDataRegions();
+    else if (cmd == "references") result = cmdReferences();
     else if (cmd == "listing") result = cmdListing();
     else if (cmd.rfind("ann_", 0) == 0) {
-        static const std::set<std::string> known = {"ann_label", "ann_routine", "ann_variable", "ann_data", "ann_comment", "ann_remove",
+        static const std::set<std::string> known = {"ann_label", "ann_routine", "ann_variable", "ann_data", "ann_comment", "ann_constant", "ann_remove",
                                                    "ann_title", "ann_list", "ann_save", "ann_load"};
         if (!known.count(cmd)) return false;
         result = cmdAnnotate(cmd);
@@ -484,6 +739,7 @@ bool Session::Impl::analysisCommand(const std::string& cmd, Json& result) {
         for (const auto& c : s.firmwareLog_) {
             Json e = Json::object();
             e.set("name", c.name).set("addr", hex16(c.address)).set("A", hex8(c.a)).set("BC", hex16(c.bc)).set("DE", hex16(c.de)).set("HL", hex16(c.hl));
+            if (c.callSite) e.set("call_site", hex16(*c.callSite));
             list.push(std::move(e));
         }
         result = Json::object();

@@ -15,7 +15,8 @@ für einen lokalen LLM-Agenten gedacht; geplant ist außerdem der Ausbau zu eine
 - Labels mit Vorwärtsreferenzen, `EQU`, `ORG` (auch mehrfach), `DB`/`DW`/`DM`/`DS`, `END`
 - Ausdrücke: `+ - * / % << >> & | ^ ~`, Klammern, `$` (aktuelle Adresse), `HIGH()`, `LOW()`
 - Zahlen als `123`, `&1F`, `$1F`, `0x1F`, `1Fh`, `%1010`, `'A'`
-- Ausgabe: Raw-Binary, Intel HEX, direkt in einen Amstrad-CPC-`.sna`-Snapshot, Listing, Symboltabelle
+- Ausgabe: Raw-Binary, Intel HEX, Binary mit AMSDOS-Kopf, direkt in einen Amstrad-CPC-`.sna`-Snapshot, Listing, Symboltabelle
+- Optimierung `-O`: `JP` → `JR`, wo das Ziel in Reichweite ist
 - Fehlermeldungen mit Zeilennummer; alle Fehler eines Laufs werden gesammelt
 
 **Disassembler**
@@ -24,7 +25,13 @@ für einen lokalen LLM-Agenten gedacht; geplant ist außerdem der Ausbau zu eine
 - Querverweise: zu jedem Sprung-/Aufrufziel werden die Aufrufer angezeigt
 - Kommentardatei (`Adresse,"Text"`), Inline-Daten hinter einem `CALL` (z. B. Texte)
 - Ausgabe als lesbares Listing **oder** als wieder assemblierbarer Quelltext (`--asm`, mit Labels)
-- Eingabe: Raw-Binary oder CPC-`.sna`-Snapshot
+- folgt **Sprungtabellen** (Adresstabellen hinter `JP (HL)`, Reihen von `JP`)
+- Eingabe: Raw-Binary, Datei mit AMSDOS-Kopf, Datei auf einem CPC-Disk-Abbild (`.dsk`) oder CPC-`.sna`-Snapshot
+
+**CPC-Disketten** ([docs/usage.md](docs/usage.md#dsk--cpc-disk-abbilder-lesen)) – `z80tool dsk info|ls|extract|boot|sector`
+- Standard- und Extended-DSK, AMSDOS-Dateisystem (DATA, SYSTEM, IBM), Dateien über mehrere Extents, AMSDOS-Kopf
+- **gepackte Programme**: im Emulator bis zum entpackten Code laufen lassen (`run_until_unpacked`) und den Speicher sichern
+  ([docs/unpacking.md](docs/unpacking.md))
 
 **Emulator** ([docs/emulator.md](docs/emulator.md))
 - befehlsgenauer Z80-Kern: **besteht ZEXDOC und ZEXALL** (inkl. undokumentierter Flags und `MEMPTR`),
@@ -46,6 +53,10 @@ für einen lokalen LLM-Agenten gedacht; geplant ist außerdem der Ausbau zu eine
   verifiziert**, das Modell kann den Code also nicht verändern
 - Amstrad CPC: 231 Firmware-Einträge, Gate Array/CRTC/PPI, Videorendering (Modi 0–2), Snapshots, ROMs;
   **die echte 6128-Firmware bootet bis „Ready“** und zeichnet Text, den das Modell dann als Bild sieht
+- die Analyse erkennt **Sprungtabellen**, **Strings, String-Zeigertabellen, Zahlentabellen und 16-Bit-Variablen**, Tail-Calls und
+  verstreute Routinenteile; der Auftrag an das Modell zeigt, worauf die Operanden einer Routine zeigen
+- `--dry-run` zeigt ohne Modell, was ein Lauf tun würde; `agent/z80_drive.py` bedient dieselben Werkzeuge von Hand, Schritt für Schritt
+  ([Anleitung](docs/walkthrough.md))
 
 **Monitor** ([docs/monitor.md](docs/monitor.md)) – `z80tool monitor`
 - klassische Eingabeschleife mit Hex-Standard: disassemblieren (`d`), Speicher ansehen/ändern/
