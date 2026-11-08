@@ -47,6 +47,19 @@ class DskImage {
 public:
     /// Throws DskError if the bytes are not a disk image (or its track table is damaged).
     static DskImage parse(std::span<const Byte> bytes);
+    /// An empty, formatted single-sided disk: "data" (40 tracks, sectors &C1-&C9) or "system" (sectors &41-&49, two reserved tracks).
+    /// Throws DskError for another format.
+    static DskImage createFormatted(const std::string& format = "data", unsigned tracks = 40);
+    /// The image as a file (standard "MV - CPCEMU" layout if all tracks have the same size, otherwise "EXTENDED CPC DSK").
+    [[nodiscard]] std::vector<Byte> serialize() const;
+    /// Writes a file into the AMSDOS file system (a file of the same name and user is replaced). `data` is stored as it is: give it an
+    /// AMSDOS header (makeAmsdosHeader) for a binary that LOAD/RUN should start. The last record is padded with &1A.
+    /// Throws DskError if the name is invalid or the disk or its directory is full.
+    void writeFile(const std::string& name, std::span<const Byte> data, unsigned user = 0, bool system = false, bool readOnly = false);
+    /// Removes a file from the directory (its blocks become free). False if there is no such file.
+    bool deleteFile(const std::string& name, unsigned user = 0);
+    /// Free space in bytes (whole blocks).
+    [[nodiscard]] std::size_t freeBytes() const;
     [[nodiscard]] static bool looksLikeDsk(std::span<const Byte> bytes);
 
     struct Sector {
@@ -84,6 +97,11 @@ private:
     };
     [[nodiscard]] std::optional<Geometry> geometry() const;
     [[nodiscard]] std::vector<Byte> block(const Geometry& g, unsigned number) const;
+    void writeBlock(const Geometry& g, unsigned number, std::span<const Byte> data);
+    [[nodiscard]] unsigned blockCount(const Geometry& g) const;
+    [[nodiscard]] std::vector<Byte> directory(const Geometry& g) const;
+    void writeDirectory(const Geometry& g, const std::vector<Byte>& dir);
+    Sector* sectorRef(unsigned track, Byte id);
 
     bool extended_ = false;
     unsigned tracks_ = 0, sides_ = 1;

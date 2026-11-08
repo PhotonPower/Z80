@@ -47,7 +47,7 @@ Tail-Calls und Routinenblöcke, `setup` für `run_routine`, Läufe durch leeren 
 
 Offen: Erprobung und Prompt-Feinschliff mit einem echten Qwen3-VL; 128K-Banking; Modus 3 und Blinken; Tastatur-/Joystick-Eingaben für
 Programme, die auf Eingaben warten; Erkennung weiterer Datentypen (Sprites, Strukturen über `IX`/`IY`); `RST`-Verteiler mit Daten dahinter;
-Vergleich mehrerer Läufe (Selbstkonsistenz) und Rückfragen an den Menschen bei Unsicherheit; Disk-Abbilder schreiben (`dsk put`).
+Vergleich mehrerer Läufe (Selbstkonsistenz) und Rückfragen an den Menschen bei Unsicherheit. (Disk-Abbilder schreiben: erledigt, `dsk new`/`dsk put`.)
 
 ## Danach (Ideen)
 

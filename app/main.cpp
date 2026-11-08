@@ -48,7 +48,7 @@ void printUsage(std::ostream& out) {
         << "Usage:\n"
         << "  z80tool asm <source.asm> [options]\n"
         << "  z80tool dis <image>      [options]\n"
-        << "  z80tool dsk <info|ls|extract|boot|sector> <image.dsk> ...   read a CPC disk image\n"
+        << "  z80tool dsk <info|ls|extract|boot|sector|new|put> <image.dsk> ...   CPC disk images\n"
         << "  z80tool monitor [image] [--org <hex>] [--no-files]   interactive machine-code monitor\n"
         << "  z80tool serve [--allow-files]   emulator server: JSON requests on stdin, replies on stdout\n"
         << "  z80tool help | version\n"
@@ -90,6 +90,9 @@ void printUsage(std::ostream& out) {
         << "  extract <image> <name> [-o <file>] [--keep-header]   copy a file out (the AMSDOS header is removed)\n"
         << "  boot <image> [-o <file>]       the boot sector of a SYSTEM disk (track 0, sector &41)\n"
         << "  sector <image> <track> <id>    hex dump of one sector (id e.g. 0xC1)\n"
+        << "  new <image> [--format data|system] [--tracks n]   an empty, formatted disk (AMSDOS)\n"
+        << "  put <image> <file> [--name NAME.EXT] [--user n] [--system-file] [--read-only]\n"
+        << "                                 write a file (as it is: use asm --amsdos for a header)\n"
         << "\n"
         << "Numbers: 123  &1F  $1F  0x1F  1Fh  %1010\n";
 }
@@ -331,20 +334,48 @@ int runDis(Args args) {
 // ---- dsk -------------------------------------------------------------------------------
 
 int runDsk(Args args) {
-    if (args.done()) throw UsageError("dsk needs a sub-command: info, ls, extract, boot or sector");
+    if (args.done()) throw UsageError("dsk needs a sub-command: info, ls, extract, boot, sector, new or put");
     const std::string sub = args.next();
     std::vector<std::string> positional;
-    std::string output;
-    bool all = false, keepHeader = false;
+    std::string output, fileName, diskFormat = "data";
+    bool all = false, keepHeader = false, systemFile = false, readOnly = false;
+    unsigned user = 0, tracks = 40;
     while (!args.done()) {
         const std::string a = args.next();
         if (a == "-o") output = args.value(a);
         else if (a == "-a") all = true;
         else if (a == "--keep-header") keepHeader = true;
+        else if (a == "--name") fileName = args.value(a);
+        else if (a == "--format") diskFormat = args.value(a);
+        else if (a == "--system-file") systemFile = true;
+        else if (a == "--read-only") readOnly = true;
+        else if (a == "--user" || a == "--tracks") {
+            const auto v = z80::parseConstant(args.value(a));
+            if (!v || *v < 0 || *v > 255) throw UsageError("invalid value for " + a);
+            (a == "--user" ? user : tracks) = static_cast<unsigned>(*v);
+        }
         else if (!a.empty() && a[0] == '-' && a.size() > 1 && !std::isdigit(static_cast<unsigned char>(a[1]))) throw UsageError("unknown option " + a);
         else positional.push_back(a);
     }
     if (positional.empty()) throw UsageError("no disk image given");
+    if (sub == "new") {
+        if (fs::exists(positional[0])) throw UsageError("'" + positional[0] + "' exists already");
+        const z80::DskImage fresh = z80::DskImage::createFormatted(diskFormat, tracks);
+        z80::writeFile(positional[0], fresh.serialize());
+        std::cout << "formatted " << positional[0] << ": " << diskFormat << " format, " << tracks << " tracks, " << fresh.freeBytes() / 1024 << " KiB free\n";
+        return kExitOk;
+    }
+    if (sub == "put") {
+        if (positional.size() < 2) throw UsageError("put needs the disk image and the file");
+        z80::DskImage target = z80::DskImage::parse(z80::readFile(positional[0]));
+        const auto data = z80::readFile(positional[1]);
+        std::string name = fileName.empty() ? fs::path(positional[1]).filename().string() : fileName;
+        target.writeFile(name, data, user, systemFile, readOnly);
+        z80::writeFile(positional[0], target.serialize());
+        std::cout << "written " << data.size() << " bytes as " << user << ":" << name << " to " << positional[0] << " ("
+                  << (z80::parseAmsdosHeader(data) ? "with" : "without") << " AMSDOS header), " << target.freeBytes() / 1024 << " KiB free\n";
+        return kExitOk;
+    }
     const z80::DskImage disk = z80::DskImage::parse(z80::readFile(positional[0]));
     auto writeBytes = [&](const std::vector<z80::Byte>& bytes, const std::string& fallback) {
         const std::string target = output.empty() ? fallback : output;

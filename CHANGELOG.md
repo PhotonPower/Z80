@@ -45,6 +45,8 @@ die Versionierung an [Semantic Versioning](https://semver.org/lang/de/).
   - Eingebettete Daten hinter einem `CALL` (Inline-Strings) erscheinen im Listing als Text (`DB "TODAY'S GREATEST SORCERER",'S'+&80`).
   - Assembler: **`ORG adresse,ablage`** assembliert für eine Adresse und legt die Bytes an einer anderen ab (Code, den ein Lader verschiebt).
   - `asm --exec` nimmt auch ein Label.
+  - **Disk-Abbilder schreiben:** `z80tool dsk new` (leere DATA- oder SYSTEM-Diskette) und `dsk put` (Datei ins AMSDOS-Dateisystem,
+    mehrere Extents, Attribute, Ersetzen); `DskImage::createFormatted`, `writeFile`, `deleteFile`, `freeBytes`, `serialize`.
 
 ### Geändert
 - `max_instructions` höchstens 100 Millionen; `0` (ohne Befehlslimit) nur zusammen mit `max_cycles`.

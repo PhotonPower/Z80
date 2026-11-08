@@ -321,5 +321,85 @@ int main() {
         std::filesystem::remove(binPath);
     }
 
+    // ---- writing: format, put, read back; the written image is read by the parser and by an independent builder's layout ----
+    {
+        DskImage d = DskImage::createFormatted("data");
+        CHECK_EQ(d.format(), std::string("data"));
+        CHECK(d.files().empty());
+        CHECK_EQ(d.freeBytes(), std::size_t{178 * 1024});  // 180 blocks, 2 for the directory
+        d.writeFile("game.bin", withHeader);
+        d.writeFile("BIG.DAT", big, 0, false, true);
+        d.writeFile("HIDDEN.SYS", pattern(130, 4), 0, true);
+        d.writeFile("USER1.TXT", pattern(256, 5), 1);
+        const auto bytes = d.serialize();
+        CHECK_EQ(bytes.size(), std::size_t{256 + 40 * 4864});  // standard layout: 40 tracks of 256 + 9 x 512 bytes
+        CHECK(std::string(bytes.begin(), bytes.begin() + 8) == "MV - CPC");
+        const DskImage r = DskImage::parse(bytes);
+        CHECK_EQ(r.files().size(), std::size_t{4});
+        const auto g = r.readFile("GAME.BIN");
+        CHECK(std::equal(withHeader.begin(), withHeader.end(), g.begin()));
+        CHECK_EQ(g.size(), (withHeader.size() + 127) / 128 * 128);
+        CHECK_EQ(g.back(), Byte{0x1A});  // the last record is padded like CP/M does
+        const auto bg = r.readFile("BIG.DAT");
+        CHECK(std::equal(big.begin(), big.end(), bg.begin()));  // three extents
+        bool sawAttrs = false;
+        for (const auto& f : r.files()) sawAttrs = sawAttrs || (f.name == "BIG.DAT" && f.readOnly) || (f.name == "HIDDEN.SYS" && f.system);
+        CHECK(sawAttrs);
+        CHECK_EQ(r.readFile("USER1.TXT", 1u).size(), std::size_t{256});
+        // the same layout as the hand-built disk: the parsed directory of both gives the same files
+        const DskImage hand = DskImage::parse(buildDisk(false, 0xC1, files, false));
+        CHECK(std::equal(big.begin(), big.end(), hand.readFile("BIG.DAT").begin()));
+        // replace, delete, full disk, bad names
+        DskImage e = DskImage::parse(bytes);
+        const std::size_t before = e.freeBytes();
+        e.writeFile("GAME.BIN", pattern(100, 9));
+        CHECK_EQ(e.readFile("GAME.BIN").size(), std::size_t{128});
+        CHECK_EQ(e.files().size(), std::size_t{4});
+        CHECK(e.freeBytes() > before);  // 6 KiB freed, 1 used
+        CHECK(e.deleteFile("BIG.DAT"));
+        CHECK(!e.deleteFile("BIG.DAT"));
+        CHECK_EQ(e.files().size(), std::size_t{3});
+        bool threw = false;
+        try {
+            e.writeFile("HUGE.BIN", std::vector<Byte>(200 * 1024, 1));
+        } catch (const DskError&) {
+            threw = true;
+        }
+        CHECK(threw);
+        for (const char* bad : {"", "TOOLONGNAME.BIN", "A.LONG", "A*B.BIN", ".BIN"}) {
+            threw = false;
+            try {
+                e.writeFile(bad, std::vector<Byte>(10, 1));
+            } catch (const DskError&) {
+                threw = true;
+            }
+            CHECK(threw);
+        }
+        // 64 directory entries at most
+        DskImage many = DskImage::createFormatted("data");
+        threw = false;
+        try {
+            for (int i = 0; i < 70; ++i) many.writeFile("F" + std::to_string(i) + ".X", std::vector<Byte>(10, 1));
+        } catch (const DskError&) {
+            threw = true;
+        }
+        CHECK(threw);
+        CHECK_EQ(many.files().size(), std::size_t{64});
+        // SYSTEM format: two reserved tracks, the boot sector is untouched by files
+        DskImage sys = DskImage::createFormatted("system");
+        CHECK_EQ(sys.format(), std::string("system"));
+        sys.writeFile("BIG.DAT", big);
+        const DskImage sr = DskImage::parse(sys.serialize());
+        CHECK(std::equal(big.begin(), big.end(), sr.readFile("BIG.DAT").begin()));
+        CHECK_EQ(sr.bootSector()[0], Byte{0xE5});
+        threw = false;
+        try {
+            (void)DskImage::createFormatted("ibm");
+        } catch (const DskError&) {
+            threw = true;
+        }
+        CHECK(threw);
+    }
+
     return finish("dsk");
 }

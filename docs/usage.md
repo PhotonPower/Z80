@@ -124,7 +124,13 @@ z80tool dsk ls      spiel.dsk [-a]             # Verzeichnis mit Größe und AMS
 z80tool dsk extract spiel.dsk SPIEL.BIN [-o datei] [--keep-header]   # Datei herauskopieren, ohne AMSDOS-Kopf
 z80tool dsk boot    spiel.dsk [-o boot.bin]    # Bootsektor einer SYSTEM-Diskette (Spur 0, Sektor &41)
 z80tool dsk sector  spiel.dsk 0 0xC1           # ein Sektor als Hexdump mit ID und FDC-Status
+z80tool dsk new     neu.dsk [--format data|system] [--tracks 40]   # leere, formatierte AMSDOS-Diskette
+z80tool dsk put     neu.dsk PROG.BIN [--name NAME.EXT] [--user n] [--system-file] [--read-only]
 ```
+
+`put` schreibt die Datei so, wie sie ist (eine gleichnamige wird ersetzt); für ein Programm, das `RUN"PROG"` starten soll, vorher mit
+`asm --amsdos … --exec …` einen AMSDOS-Kopf erzeugen. Der letzte 128-Byte-Record wird wie unter CP/M mit &1A aufgefüllt. Geschrieben wird
+das Standardformat („MV - CPCEMU“), solange alle Spuren gleich groß sind, sonst „EXTENDED CPC DSK“.
 
 Gelesen werden „MV - CPCEMU“- und „EXTENDED CPC DSK“-Abbilder mit dem AMSDOS-Dateisystem in den Formaten DATA (&C1–&C9), SYSTEM/VENDOR (&41–&49)
 und IBM (&01–&08); siehe [formats.md](formats.md#cpc-disk-abbild-dsk). `dis` disassembliert eine Datei direkt von einer Diskette
