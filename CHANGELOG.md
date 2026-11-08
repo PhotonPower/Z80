@@ -40,10 +40,19 @@ die Versionierung an [Semantic Versioning](https://semver.org/lang/de/).
   (auch außerhalb eines Ausschnitts), `equates:false`; Läufe melden `fetched_from_empty_memory`; `firmware_log` mit `call_site`.
 - Tests `analysis`, `unpack`, `dsk`, `optimize`; der Robustheitstest schickt dem Server Tausende zufälliger Befehle.
 
+- Gefunden beim Kommentieren eines echten Spiels (Sorcery, Amstrad CPC):
+  - Die Analyse verfolgt **selbst installierte Interrupt-Handler** (`LD HL,x` … `LD (&0039),HL`, auch über DE/BC) als eigene Routinen.
+  - Eingebettete Daten hinter einem `CALL` (Inline-Strings) erscheinen im Listing als Text (`DB "TODAY'S GREATEST SORCERER",'S'+&80`).
+  - Assembler: **`ORG adresse,ablage`** assembliert für eine Adresse und legt die Bytes an einer anderen ab (Code, den ein Lader verschiebt).
+  - `asm --exec` nimmt auch ein Label.
+
 ### Geändert
 - `max_instructions` höchstens 100 Millionen; `0` (ohne Befehlslimit) nur zusammen mit `max_cycles`.
 - `ann_remove` entfernt auch einen Datenbereich und eine Konstanten-Markierung; `name+versatz` ab 10 hexadezimal (`spieler+&26`).
 - `call` meldet bei der Rücksprungadresse mit falschem Stapelzeiger einen `note`.
+
+### Behoben (Sorcery)
+- Das Listing schrieb hinter Portwerten (`LD BC,PPI_A+&0E`) eine Bildschirmadress-Erklärung.
 
 ### Behoben
 - `ann_load` stürzte bei einer Projektdatei ab, deren Eintrag kein `address`/`length` hatte (gefunden vom neuen Robustheitstest);

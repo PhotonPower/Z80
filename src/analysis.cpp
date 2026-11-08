@@ -85,6 +85,36 @@ std::optional<DataOperand> dataOperandAt(const Memory& memory, Word address) {
     return found;
 }
 
+// ---- interrupt handlers ----------------------------------------------------------------------------------------------------------
+
+std::vector<Word> findInterruptHandlers(const Memory& memory, const Disassembler& dis) {
+    std::vector<Word> out;
+    for (unsigned a = 0; a < kAddressSpace; ++a) {
+        if (!dis.isInstructionStart(static_cast<Word>(a))) continue;
+        const Instruction store = decode(memory, static_cast<Word>(a), {});
+        // LD (&0039),HL  /  LD (&0039),DE / LD (&0039),BC
+        const bool viaHl = store.length == 3 && store.bytes[0] == 0x22 && store.bytes[1] == 0x39 && store.bytes[2] == 0x00;
+        const bool viaEd = store.length == 4 && store.bytes[0] == 0xED && (store.bytes[1] == 0x53 || store.bytes[1] == 0x43) &&
+                           store.bytes[2] == 0x39 && store.bytes[3] == 0x00;
+        if (!viaHl && !viaEd) continue;
+        const std::string pair = viaHl ? "HL" : store.bytes[1] == 0x53 ? "DE" : "BC";
+        Word cur = static_cast<Word>(a);
+        for (int k = 0; k < 6; ++k) {
+            const auto p = previousInstruction(memory, dis, cur);
+            if (!p || p->flow != FlowKind::Sequential) break;
+            if (immediateLoadPair(*p) == pair) {
+                out.push_back(immediateValue(*p));
+                break;
+            }
+            if (writesPair(*p, pair)) break;
+            cur = p->address;
+        }
+    }
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
+}
+
 // ---- jump tables ---------------------------------------------------------------------------------------------------------------
 
 std::vector<JumpTable> findJumpTables(const Memory& memory, const Disassembler& dis, const AnalysisContext& ctx) {

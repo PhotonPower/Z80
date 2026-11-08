@@ -58,7 +58,7 @@ void printUsage(std::ostream& out) {
         << "  --hex <file>     write Intel HEX\n"
         << "  --sna <file>     patch the code into the RAM image of a CPC snapshot (in place)\n"
         << "  --amsdos <file>  write a binary with an AMSDOS header (load address = lowest address)\n"
-        << "  --exec <addr>    entry address in the AMSDOS header (default: the load address)\n"
+        << "  --exec <addr>    entry address in the AMSDOS header, a number or a label (default: the load address)\n"
         << "  -l <file|->      write a listing ('-' = standard output)\n"
         << "  -s <file|->      write the symbol table\n"
         << "  --org <addr>     start address before the first ORG (default 0)\n"
@@ -139,7 +139,7 @@ void writeText(const std::string& target, const std::string& text) {
 
 int runAsm(Args args) {
     std::string source, binOut, hexOut, snaFile, listing, symbols, amsdosOut;
-    std::optional<z80::Word> exec;
+    std::string execText;  // a number or a symbol of the program
     z80::AssemblerOptions options;
 
     while (!args.done()) {
@@ -148,7 +148,7 @@ int runAsm(Args args) {
         else if (a == "--hex") hexOut = args.value(a);
         else if (a == "--sna") snaFile = args.value(a);
         else if (a == "--amsdos") amsdosOut = args.value(a);
-        else if (a == "--exec") exec = parseAddress(args.value(a), "entry address");
+        else if (a == "--exec") execText = args.value(a);
         else if (a == "-l") listing = args.value(a);
         else if (a == "-s") symbols = args.value(a);
         else if (a == "--org") options.origin = parseAddress(args.value(a), "origin");
@@ -183,7 +183,14 @@ int runAsm(Args args) {
     if (!amsdosOut.empty() && !result.empty()) {
         const auto bytes = result.flatten();
         const auto load = static_cast<z80::Word>(result.lowAddress());
-        std::vector<z80::Byte> file = z80::makeAmsdosHeader(fs::path(amsdosOut).filename().string(), load, exec.value_or(load),
+        z80::Word exec = load;
+        if (!execText.empty()) {
+            std::string upper = execText;
+            for (char& c : upper) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+            if (auto it = result.symbols.find(upper); it != result.symbols.end()) exec = static_cast<z80::Word>(it->second.value);
+            else exec = parseAddress(execText, "entry address");
+        }
+        std::vector<z80::Byte> file = z80::makeAmsdosHeader(fs::path(amsdosOut).filename().string(), load, exec,
                                                             static_cast<std::uint32_t>(bytes.size()));
         file.insert(file.end(), bytes.begin(), bytes.end());
         z80::writeFile(amsdosOut, file);

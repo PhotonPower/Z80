@@ -136,14 +136,16 @@ private:
     // ---- output -----------------------------------------------------------------
     void emit(const std::vector<Byte>& bytes) {
         if (!final_ || bytes.empty()) return;
-        if (static_cast<std::uint32_t>(pc_) + bytes.size() > kAddressSpace) {
+        // the bytes go to the storage address: the program counter plus the offset of ORG address,storage
+        const auto store = static_cast<Word>(pc_ + storeOffset_);
+        if (static_cast<std::uint32_t>(store) + bytes.size() > kAddressSpace) {
             error("code exceeds address space (&FFFF)");
             return;
         }
-        if (!segments.empty() && segments.back().end() == pc_) {
+        if (!segments.empty() && segments.back().end() == store) {
             segments.back().bytes.insert(segments.back().bytes.end(), bytes.begin(), bytes.end());
         } else {
-            segments.push_back({pc_, bytes});
+            segments.push_back({store, bytes});
         }
     }
 
@@ -307,14 +309,19 @@ private:
         if (mn == "END") {
             ended_ = true;
         } else if (mn == "ORG") {
-            if (operandText.empty()) {
-                error("ORG needs an address");
+            // ORG address[,storage]: assemble for `address` (labels, $) but put the bytes at `storage` - for code that is loaded in one
+            // place and moved to another before it runs
+            const auto items = splitOperands(operandText);
+            if (operandText.empty() || items.size() > 2) {
+                error("ORG needs an address (and optionally where the bytes are stored)");
             } else {
-                const std::int64_t v = eval(operandText, pc_).value;
-                if (v < 0 || v > 0xFFFF) {
+                const std::int64_t v = eval(items[0], pc_).value;
+                const std::int64_t store = items.size() == 2 ? eval(items[1], pc_).value : v;
+                if (v < 0 || v > 0xFFFF || store < 0 || store > 0xFFFF) {
                     error("ORG address out of range");
                 } else {
                     pc_ = static_cast<Word>(v);
+                    storeOffset_ = static_cast<Word>(store - v);
                 }
             }
         } else if (mn == "DB" || mn == "DEFB" || mn == "DM" || mn == "DEFM") {
@@ -359,6 +366,7 @@ private:
     const std::vector<std::string>& lines_;
     bool final_;
     Word pc_ = 0;
+    Word storeOffset_ = 0;  // storage address - program counter (ORG address,storage)
     int lineNo_ = 0;
     bool ended_ = false;
     std::set<std::string> definedThisPass_;

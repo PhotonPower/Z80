@@ -205,11 +205,18 @@ Json Session::Impl::cmdAnalyze() {
         for (Word e : s.analysisEntries_) s.dis_->addEntryPoint(e);
         s.dis_->analyzeFlow(entries.empty() ? *s.analysisEntries_.begin() : entries[0]);
     }
-    // jump tables: follow their targets until nothing new turns up
+    // jump tables (and interrupt handlers the program installs): follow their targets until nothing new turns up
     const bool followTables = flag("tables", true);
     for (int round = 0; round < 16; ++round) {
         s.jumpTables_ = findJumpTables(s.memory_, *s.dis_, analysisContext());
         bool grown = false;
+        for (Word handler : findInterruptHandlers(s.memory_, *s.dis_)) {
+            if (s.dis_->isInstructionStart(handler)) continue;
+            s.analysisEntries_.insert(handler);  // a routine of its own: nobody calls it, the interrupt does
+            s.dis_->addEntryPoint(handler);
+            s.dis_->analyzeFlow(handler);
+            grown = true;
+        }
         for (const JumpTable& t : s.jumpTables_) {
             if (!t.followed || !followTables) continue;
             if (t.kind == JumpTable::Kind::Pointers) {

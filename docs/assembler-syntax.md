@@ -65,6 +65,7 @@ Kopien der Rotationsbefehle mit Zielregister (`RLC (IX+d),B`).
 | Befehl                         | Wirkung                                                                      |
 |--------------------------------|------------------------------------------------------------------------------|
 | `ORG adr`                      | Programmzähler setzen; mehrfach erlaubt (jedes `ORG` beginnt ein neues Segment) |
+| `ORG adr,ablage`               | für `adr` assemblieren (Labels, `$`), die Bytes aber ab `ablage` speichern: Code, der an einer Stelle geladen und vor dem Start verschoben wird (wie in WinAPE und RASM) |
 | `label EQU wert`               | Konstante definieren                                                         |
 | `DB`, `DEFB` `w1,w2,"text",…`  | Bytes; Strings in `"…"` werden zeichenweise eingesetzt                         |
 | `DW`, `DEFW` `w1,w2,…`         | 16-Bit-Wörter, niederwertiges Byte zuerst                                      |

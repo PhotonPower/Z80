@@ -266,5 +266,17 @@ int main() {
         CHECK(r.formatSymbols().find("START") != std::string::npos);
     }
 
+    // ORG address,storage: assembled for one address, stored at another (a loader moves it there)
+    {
+        const auto r = z80::Assembler().assemble("        ORG &4000\nl1:     JP l2\n        ORG &8000,&4003\nl2:     JP l1\n        DW $\n");
+        CHECK(r.ok());
+        CHECK_EQ(r.lowAddress(), z80::Word{0x4000});
+        CHECK_EQ(r.size(), std::size_t{8});
+        CHECK_EQ(hexBytes(r.flatten()), std::string("C3 00 80 C3 00 40 03 80"));
+        CHECK_EQ(r.symbols.at("L2").value, std::int64_t{0x8000});
+        CHECK(!z80::Assembler().assemble("        ORG 1,2,3\n").ok());
+        CHECK(!z80::Assembler().assemble("        ORG &4000,&10000\n").ok());
+    }
+
     return finish("assembler");
 }

@@ -78,6 +78,10 @@ struct AnalysisContext {
     std::vector<std::pair<Word, unsigned>> pointerRegions;  ///< annotated `pointers` regions: tables of code addresses to follow
 };
 
+/// Interrupt handlers the code installs itself: `LD HL,handler` ... `LD (&0039),HL` after a JP opcode stored at &0038 (IM 1), also
+/// through DE/BC (`LD (&0039),DE`). Such a handler is only reached through the interrupt, so the flow analysis cannot see it.
+std::vector<Word> findInterruptHandlers(const Memory& memory, const Disassembler& dis);
+
 /// Jump tables in the analysed code: rows of JP instructions and tables of addresses behind a dispatch (`LD HL,table` ... `LD E,(HL)` ...
 /// `JP (HL)`) are followed; annotated pointer regions are followed; rows of code addresses behind a plain data reference are only suggested.
 std::vector<JumpTable> findJumpTables(const Memory& memory, const Disassembler& dis, const AnalysisContext& context);

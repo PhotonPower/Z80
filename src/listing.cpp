@@ -108,6 +108,7 @@ private:
         if (inRange(a)) return autoName(a);
         return std::nullopt;
     }
+    bool hasLabelOrComment(Word a) const { return ann_.nameAt(a) || autoName(a) || ann_.commentAt(a) || ann_.blockCommentAt(a) || ann_.dataAt(a); }
     bool hasBoundary(Word a) const {
         return ann_.nameAt(a) || autoName(a) || ann_.commentAt(a) || ann_.blockCommentAt(a) || ann_.dataAt(a) || dis_.isInstructionStart(a);
     }
@@ -431,7 +432,8 @@ void Builder::codeLine(Word a, Line& line) {
         port_.reset();
     }
 
-    if (options_.hardwareComments && autoComment.empty() && ins.mnemonic == "LD" && ins.length == 3) {
+    // (not for a port number: LD BC,PPI_A+&0E is no screen address, even though &F40E lies in the screen memory)
+    if (options_.hardwareComments && autoComment.empty() && ins.mnemonic == "LD" && ins.length == 3 && operands == ins.operands) {
         static const std::set<Byte> withAddress = {0x01, 0x11, 0x21, 0x31, 0x22, 0x2A, 0x32, 0x3A};
         if (withAddress.count(ins.bytes[0])) {
             const std::string where = cpc::describeScreenAddress(static_cast<Word>(ins.bytes[1] | (ins.bytes[2] << 8)));
@@ -574,6 +576,36 @@ ListingResult Builder::build() {
                 codeLine(address, line);
                 lines_.push_back(std::move(line));
                 a += lines_.back().length;
+                continue;
+            }
+        }
+        if (dis_.isCovered(address) && !dis_.isInstructionStart(address)) {
+            // inline data behind a CALL (a text the called routine prints): shown as text when it reads like one
+            std::size_t end = a;
+            while (end <= to_ && dis_.isCovered(static_cast<Word>(end)) && !dis_.isInstructionStart(static_cast<Word>(end)) &&
+                   (end == a || !hasLabelOrComment(static_cast<Word>(end)))) {
+                ++end;
+            }
+            std::size_t printable = 0;
+            for (std::size_t k = a; k < end; ++k) printable += isPrintableAscii(ram_.readRam(static_cast<Word>(k)) & 0x7Fu) ? 1 : 0;
+            if (printable * 4 >= (end - a) * 3) {
+                for (std::size_t row = a; row < end;) {
+                    const std::size_t n = std::min<std::size_t>(40, end - row);
+                    std::vector<Byte> bytes;
+                    for (std::size_t k = 0; k < n; ++k) bytes.push_back(ram_.readRam(static_cast<Word>(row + k)));
+                    Line line;
+                    line.address = static_cast<Word>(row);
+                    if (row == a) {
+                        line.before = headerFor(line.address);
+                        if (auto label = labelAt(line.address)) line.before.push_back(*label + ":");
+                        if (const std::string* c = ann_.commentAt(line.address)) line.comment = *c;
+                    }
+                    line.code = "DB " + textRow(bytes);
+                    line.length = n;
+                    lines_.push_back(std::move(line));
+                    row += n;
+                }
+                a = end;
                 continue;
             }
         }
